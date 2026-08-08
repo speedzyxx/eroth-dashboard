@@ -45,7 +45,7 @@ import type {
   PlayerRef,
 } from "@/types/albion";
 
-const DEFAULT_TIMEOUT_MS = 18_000;
+const DEFAULT_TIMEOUT_MS = 22_000;
 
 function baseUrl(server?: AlbionServer): string {
   return SERVER_BASE[server ?? getServer()];
@@ -288,12 +288,25 @@ async function getPlayerEvents(
   return pages;
 }
 
+function inventoryHasItems(event: AlbionApiEvent): boolean {
+  return (event.Victim.Inventory ?? []).some((i) => Boolean(i?.Type));
+}
+
+function eventNeedsEnrich(event: AlbionApiEvent): boolean {
+  if (!inventoryHasItems(event)) return true;
+  if (!event.Killer?.Equipment?.MainHand?.Type) return true;
+  if (!event.Victim?.Equipment?.MainHand?.Type) return true;
+  // Participantes sin arma = huecos en compo (aliados 0/0 que solo asistieron)
+  const parts = event.Participants ?? [];
+  if (parts.some((p) => p?.Id && !p.Equipment?.MainHand?.Type)) return true;
+  return false;
+}
+
 async function enrichEvent(
   event: AlbionApiEvent,
   server?: AlbionServer,
 ): Promise<AlbionApiEvent> {
-  // Siempre pedir detalle: la lista omite MainHand de Killer/Participants
-  // y deja media pelea en "Sin arma registrada".
+  if (!eventNeedsEnrich(event)) return event;
   try {
     return await fetchJson<AlbionApiEvent>(`/events/${event.EventId}`, server);
   } catch {
@@ -320,10 +333,27 @@ async function mapPool<T, R>(
   return results;
 }
 
+async function fetchGuildTopEvents(
+  guildId: string,
+  battleId: string,
+  server?: AlbionServer,
+): Promise<AlbionApiEvent[]> {
+  try {
+    const list = await fetchJson<AlbionApiEvent[]>(
+      `/guilds/${guildId}/top?range=week&offset=0&limit=50`,
+      server,
+    );
+    return list.filter((ev) => String(ev.BattleId) === battleId);
+  } catch {
+    return [];
+  }
+}
+
 /**
- * Carga kills/deaths de la batalla:
- * todos los jugadores con actividad, en lotes (evita 504 del Gameinfo).
- * Devuelve también eventos crudos (armas / IP / dmg).
+ * Carga kills de la batalla desde varias fuentes Gameinfo:
+ * 1) kills/deaths de cada jugador con actividad
+ * 2) top kills de cada gremio home en la pelea
+ * 3) enrich selectivo de /events/{id} (loot + armas de participantes)
  */
 export async function fetchBattleKillEvents(
   battle: AlbionApiBattle,
@@ -341,12 +371,23 @@ export async function fetchBattleKillEvents(
       return b.kills + b.deaths - (a.kills + a.deaths);
     });
 
+  // También pedir historial a aliados 0/0 (a veces el summary llega desfasado)
+  const homeZero = players.filter(
+    (p) => isHomePlayer(p) && (p.kills || 0) === 0 && (p.deaths || 0) === 0,
+  );
+  const fetchTargets = [...candidates, ...homeZero];
+
   const byId = new Map<number, AlbionApiEvent>();
 
-  await mapPool(candidates, 6, async (p) => {
+  await mapPool(fetchTargets, 8, async (p) => {
     const tasks: Promise<AlbionApiEvent[]>[] = [];
-    if (p.kills > 0) tasks.push(getPlayerEvents(p.id, "kills", server));
-    if (p.deaths > 0) tasks.push(getPlayerEvents(p.id, "deaths", server));
+    if ((p.kills || 0) > 0 || isHomePlayer(p)) {
+      tasks.push(getPlayerEvents(p.id, "kills", server));
+    }
+    if ((p.deaths || 0) > 0 || isHomePlayer(p)) {
+      tasks.push(getPlayerEvents(p.id, "deaths", server));
+    }
+    if (!tasks.length) return;
     const batches = await Promise.all(tasks);
     for (const list of batches) {
       for (const ev of list) {
@@ -357,17 +398,68 @@ export async function fetchBattleKillEvents(
     }
   });
 
-  try {
-    const seed = await fetchJson<AlbionApiEvent>(`/events/${battleId}`, server);
-    if (String(seed.BattleId) === battleId || seed.EventId === Number(battleId)) {
-      byId.set(seed.EventId, seed);
-    }
-  } catch {
-    // ignore
-  }
+  // Fuente extra: top kills de gremios aliados en la pelea
+  const homeGuildIds = [
+    ...new Set(
+      players
+        .filter(isHomePlayer)
+        .map((p) => p.guildId)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ].slice(0, 8);
 
-  const eventList = [...byId.values()];
-  await mapPool(eventList, 8, async (ev) => {
+  await mapPool(homeGuildIds, 3, async (guildId) => {
+    const extras = await fetchGuildTopEvents(guildId, battleId, server);
+    for (const ev of extras) byId.set(ev.EventId, ev);
+  });
+
+  const eventList = [...byId.values()].sort((a, b) => {
+    // Enrich primero eventos con killer/victim home (loot + compo aliada)
+    const aHome =
+      isHomePlayer({
+        allianceId: a.Killer.AllianceId,
+        allianceName: a.Killer.AllianceName,
+        guildId: a.Killer.GuildId,
+        guildName: a.Killer.GuildName,
+        id: a.Killer.Id,
+      }) ||
+      isHomePlayer({
+        allianceId: a.Victim.AllianceId,
+        allianceName: a.Victim.AllianceName,
+        guildId: a.Victim.GuildId,
+        guildName: a.Victim.GuildName,
+        id: a.Victim.Id,
+      })
+        ? 1
+        : 0;
+    const bHome =
+      isHomePlayer({
+        allianceId: b.Killer.AllianceId,
+        allianceName: b.Killer.AllianceName,
+        guildId: b.Killer.GuildId,
+        guildName: b.Killer.GuildName,
+        id: b.Killer.Id,
+      }) ||
+      isHomePlayer({
+        allianceId: b.Victim.AllianceId,
+        allianceName: b.Victim.AllianceName,
+        guildId: b.Victim.GuildId,
+        guildName: b.Victim.GuildName,
+        id: b.Victim.Id,
+      })
+        ? 1
+        : 0;
+    if (aHome !== bHome) return bHome - aHome;
+    return eventNeedsEnrich(a) === eventNeedsEnrich(b)
+      ? 0
+      : eventNeedsEnrich(a)
+        ? -1
+        : 1;
+  });
+
+  // Cap de enrich para no timeout en Render; priorizados arriba
+  const toEnrich = eventList.filter(eventNeedsEnrich).slice(0, 120);
+  await mapPool(toEnrich, 10, async (ev) => {
     const rich = await enrichEvent(ev, server);
     byId.set(rich.EventId, rich);
     return rich;

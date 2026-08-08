@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMockBattleDetail } from "@/data/mockBattles";
+import { BATTLE_EXAMPLE_ID } from "@/lib/roster";
 import { fetchBattleDetail } from "@/services/battleService";
+
+export const maxDuration = 60;
 
 /**
  * GET /api/battles/[id]?live=1
- * Detalle de batalla + kills/loot del grupo.
+ * Detalle de batalla + kills/loot. Nunca sustituye otra pelea en mock.
  */
 export async function GET(
   req: NextRequest,
@@ -19,19 +22,38 @@ export async function GET(
 
   try {
     if (!live) {
+      if (String(id) !== String(BATTLE_EXAMPLE_ID)) {
+        return NextResponse.json(
+          {
+            error: `Modo mock solo tiene snapshot de ${BATTLE_EXAMPLE_ID}. Activa Live o usa ese ID.`,
+            id,
+          },
+          { status: 404 },
+        );
+      }
       return NextResponse.json(getMockBattleDetail(id));
     }
 
     const detail = await fetchBattleDetail(id);
+    if (String(detail.id) !== String(id)) {
+      return NextResponse.json(
+        { error: `ID mismatch: expected ${id}, got ${detail.id}` },
+        { status: 500 },
+      );
+    }
     return NextResponse.json(detail, {
-      headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
+      headers: { "Cache-Control": "no-store" },
     });
   } catch (error) {
-    const mock = getMockBattleDetail(id);
-    return NextResponse.json({
-      ...mock,
-      source: "mock",
-      warning: error instanceof Error ? error.message : "Live battle failed",
-    });
+    const message = error instanceof Error ? error.message : "Live battle failed";
+    console.error("[api/battles/id]", id, message);
+    return NextResponse.json(
+      {
+        error: message,
+        id,
+        source: "error",
+      },
+      { status: 503 },
+    );
   }
 }

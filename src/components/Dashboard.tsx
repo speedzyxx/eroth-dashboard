@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HeaderHero } from "@/components/HeaderHero";
 import { AppTabs, type AppTab } from "@/components/AppTabs";
 import { LastBattles } from "@/components/LastBattles";
@@ -88,17 +88,22 @@ export function Dashboard() {
   const [tab, setTab] = useState<AppTab>("battles");
   const [battles, setBattles] = useState<BattleListItem[]>(() => getMockBattleList());
   const [selectedId, setSelectedId] = useState<string | null>(String(BATTLE_EXAMPLE_ID));
-  const [battle, setBattle] = useState<BattleDetail | null>(() => getMockBattleDetail());
+  const [battle, setBattle] = useState<BattleDetail | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [minPlayers, setMinPlayers] = useState(10);
   const [minHome, setMinHome] = useState(1);
   const [manualId, setManualId] = useState("");
+  const requestSeq = useRef(0);
+
+  /** Solo datos de la batalla actualmente seleccionada (evita mezcla entre peleas) */
+  const activeBattle =
+    battle && selectedId && String(battle.id) === String(selectedId) ? battle : null;
 
   const data = useMemo(
-    () => (battle ? battleToDashboard(battle) : null),
-    [battle],
+    () => (activeBattle ? battleToDashboard(activeBattle) : null),
+    [activeBattle],
   );
 
   const loadBattles = useCallback(async (live: boolean, minP: number, minH: number) => {
@@ -125,23 +130,36 @@ export function Dashboard() {
   }, []);
 
   const loadBattle = useCallback(async (id: string, live: boolean) => {
+    const seq = ++requestSeq.current;
+    setSelectedId(id);
+    setBattle(null);
     setDetailLoading(true);
     setError(null);
     try {
       const res = await fetch(`/api/battles/${id}?live=${live ? "1" : "0"}`, {
         cache: "no-store",
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
       const json = (await res.json()) as BattleDetail & { warning?: string };
+      if (seq !== requestSeq.current) return; // respuesta vieja
+      if (String(json.id) !== String(id)) {
+        throw new Error(`Batalla incorrecta: API devolvió ${json.id}, pedimos ${id}`);
+      }
       setBattle(json);
-      setSelectedId(id);
       if (json.warning) setError(json.warning);
     } catch (e) {
-      setBattle(getMockBattleDetail(id));
-      setSelectedId(id);
-      setError(e instanceof Error ? e.message : "Error cargando batalla");
+      if (seq !== requestSeq.current) return;
+      setBattle(null);
+      setError(
+        e instanceof Error
+          ? `${e.message} — no se mezcló con otra pelea.`
+          : "Error cargando batalla",
+      );
     } finally {
-      setDetailLoading(false);
+      if (seq === requestSeq.current) setDetailLoading(false);
     }
   }, []);
 
@@ -151,10 +169,11 @@ export function Dashboard() {
 
   useEffect(() => {
     if (selectedId) void loadBattle(selectedId, liveEnabled);
-  }, [liveEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
+    // solo al montar / cambiar live
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveEnabled]);
 
   function onSelectBattle(id: string) {
-    setSelectedId(id);
     void loadBattle(id, liveEnabled);
     setTab("overview");
   }
@@ -169,13 +188,15 @@ export function Dashboard() {
   }
 
   function goTab(next: AppTab) {
-    if (next !== "battles" && !battle) {
+    if (next !== "battles" && !activeBattle && !detailLoading) {
       setError("Primero elige una batalla en la pestaña Batallas.");
       setTab("battles");
       return;
     }
     setTab(next);
   }
+
+  const detailReady = Boolean(activeBattle) && !detailLoading;
 
   return (
     <div className="relative min-h-screen overflow-x-hidden">
@@ -210,6 +231,11 @@ export function Dashboard() {
           Grupo de <span className="font-semibold text-[#f59e0b]">{LEADER_NAME}</span>
           {" — "}Eroth + alianza <span className="text-white">NULLE</span>. Usa las pestañas para
           navegar.
+          {selectedId ? (
+            <span className="ml-2 text-[#6b7280]">
+              Batalla activa: <span className="text-[#f59e0b]">{selectedId}</span>
+            </span>
+          ) : null}
         </p>
 
         <AppTabs active={tab} onChange={goTab} battleLabel={selectedId} />
@@ -254,16 +280,33 @@ export function Dashboard() {
             </div>
           )}
 
-          {tab === "overview" && battle && <BattleDetailView battle={battle} />}
+          {tab !== "battles" && detailLoading && (
+            <div className="rounded-2xl border border-[#2a3344] bg-[#16181d] px-4 py-16 text-center">
+              <p className="font-display text-lg text-white">Cargando batalla {selectedId}…</p>
+              <p className="mt-2 text-xs text-[#8b95a8]">
+                Resumen, Killboard, Loot y Party se actualizan juntos cuando termina la carga.
+              </p>
+            </div>
+          )}
 
-          {tab === "kills" && data && <Killboard kills={data.kills} />}
+          {tab !== "battles" && !detailLoading && !detailReady && (
+            <div className="rounded-2xl border border-[#2a3344] bg-[#16181d] px-4 py-16 text-center text-sm text-[#8b95a8]">
+              Elige una batalla en la pestaña Batallas.
+            </div>
+          )}
 
-          {tab === "loot" && data && (
+          {detailReady && tab === "overview" && activeBattle && (
+            <BattleDetailView battle={activeBattle} />
+          )}
+
+          {detailReady && tab === "kills" && data && <Killboard kills={data.kills} />}
+
+          {detailReady && tab === "loot" && data && (
             <LootTracker kills={data.kills} claims={data.lootClaims} />
           )}
 
-          {tab === "party" && data && (
-            <PartyStats party={data.party} summary={data.summary} />
+          {detailReady && tab === "party" && data && (
+            <PartyStats party={data.party} summary={data.summary} battleId={activeBattle!.id} />
           )}
         </div>
 

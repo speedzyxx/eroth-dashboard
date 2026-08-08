@@ -29,6 +29,7 @@ import type { PartyMemberStats, SessionSummary } from "@/types/albion";
 interface PartyStatsProps {
   party: PartyMemberStats[];
   summary: SessionSummary;
+  battleId?: string;
 }
 
 interface WeaponGroup {
@@ -304,9 +305,12 @@ function RosterGrid({
   );
 }
 
-export function PartyStats({ party, summary }: PartyStatsProps) {
+export function PartyStats({ party, summary, battleId }: PartyStatsProps) {
   const allies = useMemo(() => party.filter((p) => p.isHomeSide), [party]);
   const enemies = useMemo(() => party.filter((p) => !p.isHomeSide), [party]);
+
+  const allyWeapons = allies.filter((p) => p.weaponType).length;
+  const enemyWeapons = enemies.filter((p) => p.weaponType).length;
 
   const mvp = [...allies].sort(
     (a, b) => b.kills - a.kills || b.assistFame - a.assistFame,
@@ -322,6 +326,22 @@ export function PartyStats({ party, summary }: PartyStatsProps) {
 
   return (
     <section className="relative z-10 space-y-4">
+      <div className="rounded-xl border border-[#2a3344] bg-[#12171f] px-4 py-3 text-xs text-[#9ca3af]">
+        <p className="font-medium text-[#e8edf5]">
+          Party · batalla {battleId || summary.sessionId.replace("battle-", "")}
+        </p>
+        <p className="mt-1">
+          Aliados NULLE/Eroth: <span className="text-emerald-400">{allies.length}</span> (
+          {allyWeapons} con arma) · Enemigos:{" "}
+          <span className="text-rose-400">{enemies.length}</span> ({enemyWeapons} con arma) · Total
+          roster: {party.length}
+        </p>
+        <p className="mt-1 text-[11px] text-[#6b7280]">
+          Todos los jugadores del summary de Gameinfo cuentan. Sin arma = no aparecieron como
+          killer/víctima/participante en events cargados (típico 0K/0D sin assist registrado).
+        </p>
+      </div>
+
       <div className="grid grid-cols-3 gap-2 sm:gap-3">
         <div className="rounded-xl border border-[#2a3344] bg-[#16181d] p-3 text-center">
           <p className="text-[10px] uppercase tracking-wide text-[#8b95a8]">Total pelea</p>
