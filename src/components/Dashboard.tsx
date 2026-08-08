@@ -10,7 +10,7 @@ import { LootTracker } from "@/components/LootTracker";
 import { PartyStats } from "@/components/PartyStats";
 import { GathererMascot } from "@/components/GathererMascot";
 import { useLiveApiDefault } from "@/lib/config";
-import { BATTLE_EXAMPLE_ID, LEADER_NAME } from "@/lib/roster";
+import { BATTLE_EXAMPLE_ID, LEADER_NAME, isHomeSide } from "@/lib/roster";
 import { classifyWeaponRole } from "@/lib/weaponRoles";
 import { getMockBattleList } from "@/data/mockBattles";
 import type {
@@ -26,8 +26,21 @@ function battleToDashboard(battle: BattleDetail): DashboardData {
   const enemies = battle.players.filter((p) => !p.isHome);
   const allyLootClaims = battle.lootClaims.filter((c) => {
     if (c.kind === "trash" || c.kind === "bound") return false;
-    const killer = battle.players.find((p) => p.name === c.playerName);
-    return killer?.isHome || home.some((h) => h.name === c.playerName);
+    if (
+      isHomeSide({
+        id: c.playerId,
+        guildId: c.guildId,
+        guildName: c.guildName,
+        allianceId: c.allianceId,
+        allianceName: c.allianceName,
+      })
+    ) {
+      return true;
+    }
+    const killer = battle.players.find(
+      (p) => p.id === c.playerId || p.name.toLowerCase() === c.playerName.toLowerCase(),
+    );
+    return Boolean(killer?.isHome);
   });
   const lootableValue = allyLootClaims.reduce((s, c) => s + c.estimatedSilver, 0);
 
@@ -328,8 +341,12 @@ export function Dashboard() {
 
           {detailReady && tab === "kills" && data && <Killboard kills={data.kills} />}
 
-          {detailReady && tab === "loot" && data && (
-            <LootTracker kills={data.kills} claims={data.lootClaims} />
+          {detailReady && tab === "loot" && data && activeBattle && (
+            <LootTracker
+              kills={data.kills}
+              claims={data.lootClaims}
+              homePlayers={activeBattle.players.filter((p) => p.isHome)}
+            />
           )}
 
           {detailReady && tab === "party" && data && (

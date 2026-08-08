@@ -234,6 +234,7 @@ function mapPlayerRef(p: AlbionApiPlayer): PlayerRef {
     name: p.Name,
     guildId: p.GuildId,
     guildName: p.GuildName,
+    allianceId: p.AllianceId ?? null,
     allianceName: p.AllianceName ?? null,
   };
 }
@@ -346,10 +347,10 @@ function isEventHomeSide(ev: AlbionApiEvent): boolean {
 }
 
 /**
- * Kills de la pelea — optimizado para velocidad:
- * - todos los aliados con K/D
- * - top enemigos por actividad (cap)
- * - enrich limitado (prioriza home / loot)
+ * Kills de la pelea:
+ * - todos los aliados con K/D (+ pass extra si faltan armas)
+ * - top enemigos
+ * - enrich de TODOS los events home (loot + participantes)
  */
 export async function fetchBattleKillEvents(
   battle: AlbionApiBattle,
@@ -357,6 +358,7 @@ export async function fetchBattleKillEvents(
 ): Promise<{ kills: KillEvent[]; rawEvents: AlbionApiEvent[] }> {
   const battleId = String(battle.id);
   const players = values(battle.players);
+  const homeIds = new Set(players.filter(isHomePlayer).map((p) => p.id));
 
   const active = players
     .filter((p) => (p.kills || 0) > 0 || (p.deaths || 0) > 0)
@@ -368,15 +370,20 @@ export async function fetchBattleKillEvents(
     });
 
   const homeActive = active.filter(isHomePlayer);
-  const enemyActive = active.filter((p) => !isHomePlayer(p)).slice(0, 24);
+  const enemyActive = active.filter((p) => !isHomePlayer(p)).slice(0, 30);
   const fetchTargets = [...homeActive, ...enemyActive];
 
   const byId = new Map<number, AlbionApiEvent>();
 
-  await mapPool(fetchTargets, 10, async (p) => {
+  async function ingestPlayer(p: { id: string; kills: number; deaths: number }) {
     const tasks: Promise<AlbionApiEvent[]>[] = [];
     if ((p.kills || 0) > 0) tasks.push(getPlayerEvents(p.id, "kills", server));
     if ((p.deaths || 0) > 0) tasks.push(getPlayerEvents(p.id, "deaths", server));
+    // Aliados: pedir ambos siempre (summary a veces llega a 0/0 tarde)
+    if (homeIds.has(p.id) && !tasks.length) {
+      tasks.push(getPlayerEvents(p.id, "kills", server));
+      tasks.push(getPlayerEvents(p.id, "deaths", server));
+    }
     if (!tasks.length) return;
     const batches = await Promise.all(tasks);
     for (const list of batches) {
@@ -384,19 +391,29 @@ export async function fetchBattleKillEvents(
         if (String(ev.BattleId) === battleId) byId.set(ev.EventId, ev);
       }
     }
-  });
+  }
+
+  await mapPool(fetchTargets, 10, ingestPlayer);
+
+  // Aliados 0/0: igual pedir historial (pueden haber asistido / summary desfasado)
+  const homeZero = players.filter(
+    (p) => isHomePlayer(p) && (p.kills || 0) === 0 && (p.deaths || 0) === 0,
+  );
+  await mapPool(homeZero, 8, ingestPlayer);
 
   const eventList = [...byId.values()].sort((a, b) => {
     const aHome = isEventHomeSide(a) ? 1 : 0;
     const bHome = isEventHomeSide(b) ? 1 : 0;
     if (aHome !== bHome) return bHome - aHome;
-    const aNeed = eventNeedsEnrich(a) ? 1 : 0;
-    const bNeed = eventNeedsEnrich(b) ? 1 : 0;
-    return bNeed - aNeed;
+    return eventNeedsEnrich(a) === eventNeedsEnrich(b) ? 0 : eventNeedsEnrich(a) ? -1 : 1;
   });
 
-  // Cap bajo: armas ya suelen venir en Killer/Victim de la lista
-  const toEnrich = eventList.filter(eventNeedsEnrich).slice(0, 40);
+  const homeEnrich = eventList.filter((e) => isEventHomeSide(e) && eventNeedsEnrich(e));
+  const enemyEnrich = eventList
+    .filter((e) => !isEventHomeSide(e) && eventNeedsEnrich(e))
+    .slice(0, 20);
+  const toEnrich = [...homeEnrich, ...enemyEnrich];
+
   await mapPool(toEnrich, 12, async (ev) => {
     const rich = await enrichEvent(ev, server);
     byId.set(rich.EventId, rich);
@@ -421,45 +438,41 @@ function estimateSilver(item: EquipmentItem): number {
 function buildClaims(kills: KillEvent[]): LootClaim[] {
   const claims: LootClaim[] = [];
   for (const k of kills) {
+    const base = {
+      playerName: k.killer.name,
+      playerId: k.killer.id,
+      guildId: k.killer.guildId,
+      guildName: k.killer.guildName,
+      allianceId: k.killer.allianceId ?? null,
+      allianceName: k.killer.allianceName ?? null,
+      killEventId: k.id,
+      timestamp: k.timestamp,
+      victimName: k.victim.name,
+    };
     for (const [idx, item] of k.lootable.entries()) {
       claims.push({
+        ...base,
         id: `${k.id}-loot-${idx}`,
-        playerName: k.killer.name,
-        guildName: k.killer.guildName,
-        allianceName: k.killer.allianceName ?? null,
         item,
         estimatedSilver: estimateSilver(item),
-        killEventId: k.id,
-        timestamp: k.timestamp,
-        victimName: k.victim.name,
         kind: "lootable",
       });
     }
     for (const [idx, item] of k.trash.entries()) {
       claims.push({
+        ...base,
         id: `${k.id}-trash-${idx}`,
-        playerName: k.killer.name,
-        guildName: k.killer.guildName,
-        allianceName: k.killer.allianceName ?? null,
         item,
         estimatedSilver: 0,
-        killEventId: k.id,
-        timestamp: k.timestamp,
-        victimName: k.victim.name,
         kind: "trash",
       });
     }
     for (const [idx, item] of (k.bound ?? []).entries()) {
       claims.push({
+        ...base,
         id: `${k.id}-bound-${idx}`,
-        playerName: k.killer.name,
-        guildName: k.killer.guildName,
-        allianceName: k.killer.allianceName ?? null,
         item,
         estimatedSilver: 0,
-        killEventId: k.id,
-        timestamp: k.timestamp,
-        victimName: k.victim.name,
         kind: "bound",
       });
     }

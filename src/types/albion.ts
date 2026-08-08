@@ -28,6 +28,7 @@ export interface PlayerRef {
   name: string;
   guildId: string | null;
   guildName: string | null;
+  allianceId?: string | null;
   allianceName?: string | null;
   avatar?: string;
 }
@@ -58,7 +59,10 @@ export interface KillEvent {
 export interface LootClaim {
   id: string;
   playerName: string;
+  playerId?: string | null;
+  guildId?: string | null;
   guildName?: string | null;
+  allianceId?: string | null;
   allianceName?: string | null;
   item: EquipmentItem;
   estimatedSilver: number;

@@ -6,11 +6,13 @@ import { Box, Camera, Lock, Package, Search, Trash2, Upload } from "lucide-react
 import { ItemIcon } from "@/components/ui/ItemIcon";
 import { formatSilver, formatTimeAgo } from "@/lib/format";
 import { isHomeSide } from "@/lib/roster";
-import type { EquipmentItem, KillEvent, LootClaim } from "@/types/albion";
+import type { BattlePlayerRow, EquipmentItem, KillEvent, LootClaim } from "@/types/albion";
 
 interface LootTrackerProps {
   kills: KillEvent[];
   claims: LootClaim[];
+  /** Jugadores del lado home en ESTA pelea (alianza/party) */
+  homePlayers: BattlePlayerRow[];
 }
 
 interface ChestStack {
@@ -21,14 +23,35 @@ interface ChestStack {
   estimatedSilver: number;
 }
 
-function buildAllyChest(claims: LootClaim[]): ChestStack[] {
-  const allyLoot = claims.filter((c) => {
-    if (c.kind === "trash" || c.kind === "bound") return false;
-    return isHomeSide({
+function isAllyClaim(c: LootClaim, homePlayers: BattlePlayerRow[]): boolean {
+  if (c.kind === "trash" || c.kind === "bound") return false;
+
+  if (
+    isHomeSide({
+      id: c.playerId,
+      guildId: c.guildId,
       guildName: c.guildName,
+      allianceId: c.allianceId,
       allianceName: c.allianceName,
-    });
-  });
+    })
+  ) {
+    return true;
+  }
+
+  // Match contra roster de la pelea (cubre Somos Picsis / African Push / etc. en NULLE)
+  const byId = c.playerId && homePlayers.some((p) => p.id === c.playerId);
+  if (byId) return true;
+  const byName = homePlayers.some((p) => p.name.toLowerCase() === c.playerName.toLowerCase());
+  if (byName) return true;
+  if (c.guildName) {
+    const g = c.guildName.toLowerCase();
+    if (homePlayers.some((p) => p.guildName?.toLowerCase() === g)) return true;
+  }
+  return false;
+}
+
+function buildAllyChest(claims: LootClaim[], homePlayers: BattlePlayerRow[]): ChestStack[] {
+  const allyLoot = claims.filter((c) => isAllyClaim(c, homePlayers));
 
   const map = new Map<string, ChestStack>();
   for (const c of allyLoot) {
@@ -63,17 +86,24 @@ function buildAllyChest(claims: LootClaim[]): ChestStack[] {
     .sort((a, b) => b.estimatedSilver - a.estimatedSilver || b.totalCount - a.totalCount);
 }
 
-export function LootTracker({ kills, claims }: LootTrackerProps) {
+export function LootTracker({ kills, claims, homePlayers }: LootTrackerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [previews, setPreviews] = useState<{ name: string; url: string }[]>([]);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "lootable" | "trash" | "bound">("all");
 
-  const chest = useMemo(() => buildAllyChest(claims), [claims]);
+  const chest = useMemo(() => buildAllyChest(claims, homePlayers), [claims, homePlayers]);
   const chestValue = useMemo(
     () => chest.reduce((s, c) => s + c.estimatedSilver, 0),
     [chest],
   );
+  const allyKillCount = useMemo(() => {
+    const names = new Set(homePlayers.map((p) => p.name.toLowerCase()));
+    const ids = new Set(homePlayers.map((p) => p.id));
+    return kills.filter(
+      (k) => ids.has(k.killer.id) || names.has(k.killer.name.toLowerCase()),
+    ).length;
+  }, [kills, homePlayers]);
 
   const lootableClaims = useMemo(
     () => claims.filter((c) => c.kind === "lootable" || (!c.kind)),
@@ -169,7 +199,8 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
                 Cofre de loot aliado
               </h2>
               <p className="text-xs text-[#8b95a8]">
-                Inventario agregado del botín lootable del lado home (NULLE / Eroth)
+                Todo lo lootable de kills de la alianza/party en esta pelea ({homePlayers.length}{" "}
+                aliados · {allyKillCount} bajas aliadas)
               </p>
             </div>
           </div>
@@ -196,7 +227,10 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
             ))}
             {!chest.length && (
               <p className="col-span-full py-8 text-center text-sm text-[#8b95a8]">
-                Aún no hay lootable de aliados (o la API no devolvió inventarios).
+                Sin lootable de aliados aún
+                {homePlayers.length
+                  ? " (espera la carga de kills, o la API no trajo inventarios)."
+                  : "."}
               </p>
             )}
           </div>

@@ -18,7 +18,7 @@ export function isHomeSide(p: {
   allianceName?: string | null;
   guildId?: string | null;
   guildName?: string | null;
-  id?: string;
+  id?: string | null;
 }): boolean {
   if (p.id && p.id === LEADER_PLAYER_ID) return true;
   if (p.allianceId && p.allianceId === HOME_ALLIANCE_ID) return true;
