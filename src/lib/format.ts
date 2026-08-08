@@ -91,6 +91,9 @@ export function prettyItemName(type: string, fallback?: string): string {
     };
     return labels[tier || ""] || "Tome of Insight";
   }
+  if (/^T?\d*_?TRASH$/i.test(id) || /(?:^|_)TRASH$/i.test(id)) {
+    return "Trash (silver)";
+  }
   return id
     .replace(/^T\d+_/, "")
     .replace(/@\d+$/, "")

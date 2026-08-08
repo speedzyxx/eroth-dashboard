@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Box, Camera, Lock, Package, Search, Trash2, Upload } from "lucide-react";
+import { Box, Camera, Loader2, Lock, Package, Search, Trash2, Upload } from "lucide-react";
 import { ItemIcon } from "@/components/ui/ItemIcon";
 import { formatSilver, formatTimeAgo } from "@/lib/format";
 import { isHomeSide } from "@/lib/roster";
@@ -13,6 +13,7 @@ interface LootTrackerProps {
   claims: LootClaim[];
   /** Jugadores del lado home en ESTA pelea (alianza/party) */
   homePlayers: BattlePlayerRow[];
+  loading?: boolean;
 }
 
 interface ChestStack {
@@ -86,7 +87,7 @@ function buildAllyChest(claims: LootClaim[], homePlayers: BattlePlayerRow[]): Ch
     .sort((a, b) => b.estimatedSilver - a.estimatedSilver || b.totalCount - a.totalCount);
 }
 
-export function LootTracker({ kills, claims, homePlayers }: LootTrackerProps) {
+export function LootTracker({ kills, claims, homePlayers, loading }: LootTrackerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [previews, setPreviews] = useState<{ name: string; url: string }[]>([]);
   const [query, setQuery] = useState("");
@@ -165,6 +166,13 @@ export function LootTracker({ kills, claims, homePlayers }: LootTrackerProps) {
 
   return (
     <section className="relative z-10 space-y-4">
+      {loading && (
+        <div className="flex items-center gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-xs text-sky-200">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+          Cargando inventarios de kills aliadas… el cofre se irá completando.
+        </div>
+      )}
+
       <div className="rounded-xl border border-[#2a3344] bg-[#12171f] px-4 py-3 text-xs text-[#9ca3af]">
         <p className="font-medium text-[#e8edf5]">Cobertura de loot (API Gameinfo)</p>
         <p className="mt-1">

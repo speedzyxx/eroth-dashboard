@@ -204,6 +204,9 @@ export interface BattleDetail {
   lastUpdated: string;
   /** true = solo roster; kills/loot/armas aún cargando */
   partial?: boolean;
+  /** Se cortó por tiempo; puede faltar detalle */
+  truncated?: boolean;
+  warning?: string;
 }
 
 /** Forma cruda aproximada de un event de Gameinfo API */

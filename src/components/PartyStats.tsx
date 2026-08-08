@@ -172,7 +172,11 @@ function CompositionBoard({
                       )}
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold text-[#e8edf5]">
-                          {item ? weaponDisplayName(item.type) : "Sin arma registrada"}
+                          {item
+                            ? weaponDisplayName(item.type)
+                            : g.players.every((p) => p.kills === 0 && p.deaths === 0)
+                              ? "Presentes sin K/D (API no da arma)"
+                              : "Sin arma registrada"}
                         </p>
                         <p className="text-[10px] tabular-nums text-[#8b95a8]">
                           {g.players.length} jugador{g.players.length === 1 ? "" : "es"}

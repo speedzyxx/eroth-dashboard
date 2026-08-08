@@ -176,20 +176,24 @@ export function Dashboard() {
       if (seq !== requestSeq.current) return;
       if (!fullRes.ok) {
         const body = (await fullRes.json().catch(() => null)) as { error?: string } | null;
-        setError(body?.error || `Kills/loot: HTTP ${fullRes.status}`);
+        setError(
+          `${body?.error || `HTTP ${fullRes.status}`} — roster OK; reintenta kills abajo.`,
+        );
         return;
       }
       const full = (await fullRes.json()) as BattleDetail & { warning?: string };
       if (seq !== requestSeq.current) return;
       if (String(full.id) !== String(id)) return;
       setBattle(full);
-      if (full.warning) setError(full.warning);
+      if (full.warning || full.truncated) {
+        setError(full.warning || "Carga parcial: priorizamos loot aliado.");
+      }
     } catch (e) {
       if (seq !== requestSeq.current) return;
-      setBattle(null);
+      // Si ya hay lite, no borrar roster
       setError(
         e instanceof Error
-          ? `${e.message} — no se mezcló con otra pelea.`
+          ? `${e.message}`
           : "Error cargando batalla",
       );
     } finally {
@@ -277,15 +281,27 @@ export function Dashboard() {
         <AppTabs active={tab} onChange={goTab} battleLabel={selectedId} />
 
         {enriching && activeBattle && (
-          <p className="relative z-10 mb-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
-            Cargando kills, loot y armas en segundo plano… Resumen y roster ya disponibles.
-          </p>
+          <div className="relative z-10 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
+            <span>
+              Cargando kills, loot y armas… Resumen y roster ya listos. Priorizamos kills
+              aliadas.
+            </span>
+          </div>
         )}
 
         {error && (
-          <p className="relative z-10 mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-            {error}
-          </p>
+          <div className="relative z-10 mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            <p>{error}</p>
+            {selectedId && (
+              <button
+                type="button"
+                onClick={() => void loadBattle(selectedId, liveEnabled)}
+                className="rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 font-semibold text-amber-100 hover:bg-amber-500/25"
+              >
+                Reintentar
+              </button>
+            )}
+          </div>
         )}
 
         <div className="relative z-10">
@@ -339,13 +355,16 @@ export function Dashboard() {
             <BattleDetailView battle={activeBattle} />
           )}
 
-          {detailReady && tab === "kills" && data && <Killboard kills={data.kills} />}
+          {detailReady && tab === "kills" && data && (
+            <Killboard kills={data.kills} loading={enriching} />
+          )}
 
           {detailReady && tab === "loot" && data && activeBattle && (
             <LootTracker
               kills={data.kills}
               claims={data.lootClaims}
               homePlayers={activeBattle.players.filter((p) => p.isHome)}
+              loading={enriching}
             />
           )}
 

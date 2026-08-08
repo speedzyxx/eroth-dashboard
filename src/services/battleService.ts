@@ -45,7 +45,8 @@ import type {
   PlayerRef,
 } from "@/types/albion";
 
-const DEFAULT_TIMEOUT_MS = 22_000;
+const DEFAULT_TIMEOUT_MS = 14_000;
+const KILL_FETCH_BUDGET_MS = 38_000;
 
 function baseUrl(server?: AlbionServer): string {
   return SERVER_BASE[server ?? getServer()];
@@ -327,15 +328,19 @@ async function mapPool<T, R>(
   return results;
 }
 
+function isHomeKiller(ev: AlbionApiEvent): boolean {
+  return isHomePlayer({
+    allianceId: ev.Killer.AllianceId,
+    allianceName: ev.Killer.AllianceName,
+    guildId: ev.Killer.GuildId,
+    guildName: ev.Killer.GuildName,
+    id: ev.Killer.Id,
+  });
+}
+
 function isEventHomeSide(ev: AlbionApiEvent): boolean {
   return (
-    isHomePlayer({
-      allianceId: ev.Killer.AllianceId,
-      allianceName: ev.Killer.AllianceName,
-      guildId: ev.Killer.GuildId,
-      guildName: ev.Killer.GuildName,
-      id: ev.Killer.Id,
-    }) ||
+    isHomeKiller(ev) ||
     isHomePlayer({
       allianceId: ev.Victim.AllianceId,
       allianceName: ev.Victim.AllianceName,
@@ -347,18 +352,18 @@ function isEventHomeSide(ev: AlbionApiEvent): boolean {
 }
 
 /**
- * Kills de la pelea:
- * - todos los aliados con K/D (+ pass extra si faltan armas)
- * - top enemigos
- * - enrich de TODOS los events home (loot + participantes)
+ * Kills de la pelea con presupuesto de tiempo (evita 503 en Render).
+ * Prioridad: kills aliados → deaths aliados → enemigos → enrich inventarios home.
  */
 export async function fetchBattleKillEvents(
   battle: AlbionApiBattle,
   server?: AlbionServer,
-): Promise<{ kills: KillEvent[]; rawEvents: AlbionApiEvent[] }> {
+): Promise<{ kills: KillEvent[]; rawEvents: AlbionApiEvent[]; truncated?: boolean }> {
   const battleId = String(battle.id);
   const players = values(battle.players);
-  const homeIds = new Set(players.filter(isHomePlayer).map((p) => p.id));
+  const deadline = Date.now() + KILL_FETCH_BUDGET_MS;
+  const timeLeft = () => deadline - Date.now();
+  let truncated = false;
 
   const active = players
     .filter((p) => (p.kills || 0) > 0 || (p.deaths || 0) > 0)
@@ -369,63 +374,92 @@ export async function fetchBattleKillEvents(
       return b.kills + b.deaths - (a.kills + a.deaths);
     });
 
-  const homeActive = active.filter(isHomePlayer);
-  const enemyActive = active.filter((p) => !isHomePlayer(p)).slice(0, 30);
-  const fetchTargets = [...homeActive, ...enemyActive];
+  const homeKillers = active.filter((p) => isHomePlayer(p) && (p.kills || 0) > 0);
+  const homeDeaths = active.filter((p) => isHomePlayer(p) && (p.deaths || 0) > 0);
+  const enemyActive = active.filter((p) => !isHomePlayer(p)).slice(0, 20);
 
   const byId = new Map<number, AlbionApiEvent>();
 
-  async function ingestPlayer(p: { id: string; kills: number; deaths: number }) {
-    const tasks: Promise<AlbionApiEvent[]>[] = [];
-    if ((p.kills || 0) > 0) tasks.push(getPlayerEvents(p.id, "kills", server));
-    if ((p.deaths || 0) > 0) tasks.push(getPlayerEvents(p.id, "deaths", server));
-    // Aliados: pedir ambos siempre (summary a veces llega a 0/0 tarde)
-    if (homeIds.has(p.id) && !tasks.length) {
-      tasks.push(getPlayerEvents(p.id, "kills", server));
-      tasks.push(getPlayerEvents(p.id, "deaths", server));
+  async function ingest(
+    list: AlbionApiBattlePlayer[],
+    kinds: ("kills" | "deaths")[],
+    concurrency: number,
+  ) {
+    if (timeLeft() < 2500) {
+      truncated = true;
+      return;
     }
-    if (!tasks.length) return;
-    const batches = await Promise.all(tasks);
-    for (const list of batches) {
-      for (const ev of list) {
-        if (String(ev.BattleId) === battleId) byId.set(ev.EventId, ev);
+    await mapPool(list, concurrency, async (p) => {
+      if (timeLeft() < 2000) {
+        truncated = true;
+        return;
       }
-    }
+      const tasks: Promise<AlbionApiEvent[]>[] = [];
+      if (kinds.includes("kills") && (p.kills || 0) > 0) {
+        tasks.push(getPlayerEvents(p.id, "kills", server));
+      }
+      if (kinds.includes("deaths") && (p.deaths || 0) > 0) {
+        tasks.push(getPlayerEvents(p.id, "deaths", server));
+      }
+      if (!tasks.length) return;
+      const batches = await Promise.all(tasks);
+      for (const batch of batches) {
+        for (const ev of batch) {
+          if (String(ev.BattleId) === battleId) byId.set(ev.EventId, ev);
+        }
+      }
+    });
   }
 
-  await mapPool(fetchTargets, 10, ingestPlayer);
+  // 1) Kills aliados primero = loot del cofre
+  await ingest(homeKillers, ["kills"], 12);
+  // 2) Deaths aliados = armas al morir
+  await ingest(homeDeaths, ["deaths"], 10);
+  // 3) Enemigos (killboard / armas enemigas) si queda tiempo
+  if (timeLeft() > 8000) {
+    await ingest(enemyActive, ["kills", "deaths"], 8);
+  } else {
+    truncated = true;
+  }
 
-  // Aliados 0/0: igual pedir historial (pueden haber asistido / summary desfasado)
-  const homeZero = players.filter(
-    (p) => isHomePlayer(p) && (p.kills || 0) === 0 && (p.deaths || 0) === 0,
-  );
-  await mapPool(homeZero, 8, ingestPlayer);
+  const eventList = [...byId.values()];
 
-  const eventList = [...byId.values()].sort((a, b) => {
-    const aHome = isEventHomeSide(a) ? 1 : 0;
-    const bHome = isEventHomeSide(b) ? 1 : 0;
-    if (aHome !== bHome) return bHome - aHome;
-    return eventNeedsEnrich(a) === eventNeedsEnrich(b) ? 0 : eventNeedsEnrich(a) ? -1 : 1;
-  });
+  // 4) Enrich: inventarios de kills aliadas (loot) + armas participantes
+  const homeKillsNeedLoot = eventList
+    .filter((e) => isHomeKiller(e) && !inventoryHasItems(e))
+    .slice(0, 45);
+  const homeNeedGear = eventList
+    .filter(
+      (e) =>
+        isEventHomeSide(e) &&
+        eventNeedsEnrich(e) &&
+        !homeKillsNeedLoot.some((x) => x.EventId === e.EventId),
+    )
+    .slice(0, 25);
+  const toEnrich = [...homeKillsNeedLoot, ...homeNeedGear];
 
-  const homeEnrich = eventList.filter((e) => isEventHomeSide(e) && eventNeedsEnrich(e));
-  const enemyEnrich = eventList
-    .filter((e) => !isEventHomeSide(e) && eventNeedsEnrich(e))
-    .slice(0, 20);
-  const toEnrich = [...homeEnrich, ...enemyEnrich];
-
-  await mapPool(toEnrich, 12, async (ev) => {
-    const rich = await enrichEvent(ev, server);
-    byId.set(rich.EventId, rich);
-    return rich;
-  });
+  if (timeLeft() > 3000 && toEnrich.length) {
+    const enrichCap = Math.max(8, Math.min(toEnrich.length, Math.floor(timeLeft() / 400)));
+    await mapPool(toEnrich.slice(0, enrichCap), 10, async (ev) => {
+      if (timeLeft() < 1500) {
+        truncated = true;
+        return ev;
+      }
+      const rich = await enrichEvent(ev, server);
+      byId.set(rich.EventId, rich);
+      return rich;
+    });
+    if (enrichCap < toEnrich.length) truncated = true;
+  } else if (toEnrich.length) {
+    truncated = true;
+  }
 
   const rawEvents = [...byId.values()];
   const kills = rawEvents
     .map(mapApiEventToKill)
     .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
 
-  return { kills, rawEvents };
+  return { kills, rawEvents, truncated };
 }
 
 function estimateSilver(item: EquipmentItem): number {
@@ -598,7 +632,7 @@ function assembleBattleDetail(
   battle: AlbionApiBattle,
   killEvents: KillEvent[],
   rawKillEvents: AlbionApiEvent[],
-  opts?: { partial?: boolean },
+  opts?: { partial?: boolean; truncated?: boolean; warning?: string },
 ): BattleDetail {
   const rawPlayers = values(battle.players);
   const rawGuilds = values(battle.guilds);
@@ -685,6 +719,8 @@ function assembleBattleDetail(
     source: "live",
     lastUpdated: new Date().toISOString(),
     partial: opts?.partial ?? false,
+    truncated: opts?.truncated ?? false,
+    warning: opts?.warning,
   };
 }
 
@@ -697,6 +733,9 @@ export async function fetchBattleDetailLite(
   return assembleBattleDetail(battle, [], [], { partial: true });
 }
 
+/**
+ * Tras lite: carga kills priorizando aliados y respeta presupuesto de tiempo.
+ */
 export async function fetchBattleDetail(
   battleId: string | number,
   server?: AlbionServer,
@@ -705,13 +744,31 @@ export async function fetchBattleDetail(
 
   let killEvents: KillEvent[] = [];
   let rawKillEvents: AlbionApiEvent[] = [];
+  let truncated = false;
   try {
     const fetched = await fetchBattleKillEvents(battle, server);
     killEvents = fetched.kills;
     rawKillEvents = fetched.rawEvents;
+    truncated = Boolean(fetched.truncated);
   } catch (err) {
     console.warn("[battleService] kills fetch failed", err);
   }
 
-  return assembleBattleDetail(battle, killEvents, rawKillEvents, { partial: false });
+  const homeKillCount = killEvents.filter((k) =>
+    isHomePlayer({
+      id: k.killer.id,
+      guildId: k.killer.guildId,
+      guildName: k.killer.guildName,
+      allianceId: k.killer.allianceId,
+      allianceName: k.killer.allianceName,
+    }),
+  ).length;
+
+  return assembleBattleDetail(battle, killEvents, rawKillEvents, {
+    partial: false,
+    truncated,
+    warning: truncated
+      ? `Carga parcial (${killEvents.length} events, ${homeKillCount} kills aliadas). Reintenta si falta loot.`
+      : undefined,
+  });
 }

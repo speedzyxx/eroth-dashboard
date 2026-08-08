@@ -20,7 +20,7 @@ export const WEAPON_ROLE_LABEL: Record<WeaponRole, string> = {
   healer: "Healers",
   support: "Supports",
   dps: "DPS",
-  unknown: "Sin arma",
+  unknown: "Sin arma / sin K-D",
 };
 
 export const WEAPON_ROLE_COLOR: Record<WeaponRole, string> = {
