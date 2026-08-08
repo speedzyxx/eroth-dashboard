@@ -62,9 +62,36 @@ export function tierLabelFromType(type: string): string {
   return `T${tier}.${enchant}`;
 }
 
+/**
+ * Ítems que la API mete en Inventory pero NO dropean al morir.
+ * Tomes of Insight soulbound = SKILLBOOK_NONTRADABLE (excepto Adept T4, tradeable).
+ */
+export function isNonDropLootItem(type: string): boolean {
+  const t = sanitizeItemType(type).toUpperCase();
+  if (/^T4_SKILLBOOK_NONTRADABLE/.test(t)) return false; // Adept's Tome — tradeable
+  if (/SKILLBOOK_NONTRADABLE/.test(t)) return true;
+  if (/_NONTRADABLE/.test(t)) return true;
+  return false;
+}
+
 export function prettyItemName(type: string, fallback?: string): string {
   if (fallback) return fallback;
-  return sanitizeItemType(type)
+  const id = sanitizeItemType(type);
+  if (/SKILLBOOK_NONTRADABLE/i.test(id)) {
+    const tier = id.match(/^T(\d+)/i)?.[1];
+    const labels: Record<string, string> = {
+      "1": "Novice's Tome of Insight",
+      "2": "Journeyman's Tome of Insight",
+      "3": "Adept's Tome of Insight",
+      "4": "Adept's Tome of Insight",
+      "5": "Expert's Tome of Insight",
+      "6": "Master's Tome of Insight",
+      "7": "Grandmaster's Tome of Insight",
+      "8": "Elder's Tome of Insight",
+    };
+    return labels[tier || ""] || "Tome of Insight";
+  }
+  return id
     .replace(/^T\d+_/, "")
     .replace(/@\d+$/, "")
     .replace(/_/g, " ")
@@ -124,4 +151,14 @@ export const SLOT_LABELS: Record<EquipmentSlot, string> = {
   OffHand: "Off-hand",
   Cape: "Capa",
   Bag: "Bolsa",
+  Mount: "Montura",
+  Potion: "Poción",
+  Food: "Comida",
 };
+
+/** Clave de familia de arma (sin tier/enchant) para agrupar composición */
+export function weaponFamilyKey(type: string): string {
+  return sanitizeItemType(type)
+    .replace(/^T\d+_/, "")
+    .replace(/@\d+$/, "");
+}

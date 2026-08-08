@@ -2,13 +2,132 @@
 
 import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Award, Coins, Search, Shield, Swords, TrendingUp, Trophy } from "lucide-react";
-import { formatFame, formatSilver } from "@/lib/format";
+import {
+  Award,
+  Coins,
+  Crosshair,
+  Search,
+  Shield,
+  Swords,
+  TrendingUp,
+  Trophy,
+} from "lucide-react";
+import { ItemIcon } from "@/components/ui/ItemIcon";
+import { formatFame, formatSilver, makeItem, prettyItemName, sanitizeItemType } from "@/lib/format";
 import type { PartyMemberStats, SessionSummary } from "@/types/albion";
 
 interface PartyStatsProps {
   party: PartyMemberStats[];
   summary: SessionSummary;
+}
+
+interface WeaponGroup {
+  key: string;
+  weaponType: string | null;
+  players: PartyMemberStats[];
+}
+
+function buildWeaponGroups(players: PartyMemberStats[]): WeaponGroup[] {
+  const map = new Map<string, WeaponGroup>();
+  for (const p of players) {
+    const key = p.weaponType ? sanitizeItemType(p.weaponType) : "__none__";
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, {
+        key,
+        weaponType: p.weaponType ? sanitizeItemType(p.weaponType) : null,
+        players: [p],
+      });
+    } else {
+      existing.players.push(p);
+    }
+  }
+
+  return [...map.values()].sort((a, b) => {
+    if (a.weaponType && !b.weaponType) return -1;
+    if (!a.weaponType && b.weaponType) return 1;
+    return b.players.length - a.players.length || (a.weaponType || "").localeCompare(b.weaponType || "");
+  });
+}
+
+function CompositionBoard({
+  title,
+  accent,
+  players,
+}: {
+  title: string;
+  accent: string;
+  players: PartyMemberStats[];
+}) {
+  const groups = useMemo(() => buildWeaponGroups(players), [players]);
+  const withWeapon = players.filter((p) => p.weaponType).length;
+
+  return (
+    <div className="rounded-2xl border border-[#2a3344] bg-[#181e29] p-4 sm:p-5">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Crosshair className="h-4 w-4" style={{ color: accent }} />
+          <div>
+            <h3 className="font-display text-base font-semibold text-white">{title}</h3>
+            <p className="text-[11px] text-[#8b95a8]">
+              {groups.filter((g) => g.weaponType).length} armas · {withWeapon}/{players.length} con
+              loadout
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid max-h-[420px] grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
+        {groups.map((g) => {
+          const item = g.weaponType ? makeItem(g.weaponType) : null;
+          return (
+            <div
+              key={g.key}
+              className="rounded-xl border border-[#2a3344]/80 bg-[#12171f] p-2.5"
+            >
+              <div className="mb-2 flex items-center gap-2">
+                {item ? (
+                  <ItemIcon item={item} size={40} showTier={false} />
+                ) : (
+                  <div className="flex h-10 w-10 items-center justify-center rounded-md border border-[#2a3344] bg-[#0f131a] text-[10px] text-[#5b6578]">
+                    ?
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold text-[#e8edf5]">
+                    {item ? prettyItemName(item.type) : "Sin arma registrada"}
+                  </p>
+                  <p className="text-[10px] tabular-nums text-[#8b95a8]">
+                    {g.players.length} jugador{g.players.length === 1 ? "" : "es"}
+                    {item ? ` · ${item.tierLabel}` : ""}
+                  </p>
+                </div>
+                <span
+                  className="flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-sm font-bold tabular-nums"
+                  style={{ background: `${accent}22`, color: accent }}
+                >
+                  {g.players.length}
+                </span>
+              </div>
+              <ul className="max-h-28 space-y-0.5 overflow-y-auto text-[11px] text-[#9ca3af]">
+                {g.players.map((p) => (
+                  <li key={p.id} className="truncate">
+                    <span className="text-[#e8edf5]">{p.name}</span>
+                    {p.guildName ? (
+                      <span className="text-[#5b6578]"> · {p.guildName}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        })}
+        {!groups.length && (
+          <p className="col-span-full py-8 text-center text-xs text-[#8b95a8]">Sin jugadores</p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function RosterGrid({
@@ -25,7 +144,9 @@ function RosterGrid({
     const needle = q.trim().toLowerCase();
     if (!needle) return players;
     return players.filter((p) =>
-      `${p.name} ${p.guildName || ""} ${p.allianceName || ""}`.toLowerCase().includes(needle),
+      `${p.name} ${p.guildName || ""} ${p.allianceName || ""} ${p.weaponType || ""}`
+        .toLowerCase()
+        .includes(needle),
     );
   }, [players, q]);
 
@@ -53,19 +174,28 @@ function RosterGrid({
         {filtered.map((p) => (
           <div
             key={p.id}
-            className="flex items-center justify-between rounded-lg border border-[#2a3344]/60 bg-[#12171f] px-2.5 py-2"
+            className="flex items-center justify-between gap-2 rounded-lg border border-[#2a3344]/60 bg-[#12171f] px-2.5 py-2"
           >
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${p.isOnline ? "bg-emerald-400" : "bg-[#4b5563]"}`}
-                />
-                <p className="truncate text-sm font-medium text-[#e8edf5]">{p.name}</p>
+            <div className="flex min-w-0 items-center gap-2">
+              {p.weaponType ? (
+                <ItemIcon item={makeItem(p.weaponType)} size={28} showTier={false} />
+              ) : (
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-[#2a3344] bg-[#0f131a] text-[9px] text-[#4b5568]">
+                  —
+                </div>
+              )}
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${p.isOnline ? "bg-emerald-400" : "bg-[#4b5563]"}`}
+                  />
+                  <p className="truncate text-sm font-medium text-[#e8edf5]">{p.name}</p>
+                </div>
+                <p className="truncate text-[10px] text-[#5b6578]">
+                  {p.guildName || p.role || "—"}
+                  {p.allianceName ? ` · ${p.allianceName}` : ""}
+                </p>
               </div>
-              <p className="truncate text-[10px] text-[#5b6578]">
-                {p.guildName || p.role || "—"}
-                {p.allianceName ? ` · ${p.allianceName}` : ""}
-              </p>
             </div>
             <div className="shrink-0 text-right text-[11px] tabular-nums">
               <p className="text-[#f87171]">
@@ -116,6 +246,9 @@ export function PartyStats({ party, summary }: PartyStatsProps) {
         </div>
       </div>
 
+      <CompositionBoard title="Compo aliada" accent="#34d399" players={allies} />
+      <CompositionBoard title="Compo enemiga" accent="#f87171" players={enemies} />
+
       <div className="rounded-2xl border border-[#2a3344] bg-[#181e29] p-4 sm:p-5">
         <div className="mb-4 flex items-center gap-2">
           <Trophy className="h-4 w-4 text-[#f59e0b]" />
@@ -137,12 +270,17 @@ export function PartyStats({ party, summary }: PartyStatsProps) {
               MVP aliado
             </p>
             <div className="mt-2 flex flex-wrap items-end justify-between gap-3">
-              <div>
-                <p className="font-display text-2xl font-bold text-white">{mvp.name}</p>
-                <p className="text-xs text-[#8b95a8]">
-                  {mvp.guildName || mvp.role || "—"}
-                  {mvp.allianceName ? ` · ${mvp.allianceName}` : ""}
-                </p>
+              <div className="flex items-center gap-3">
+                {mvp.weaponType ? (
+                  <ItemIcon item={makeItem(mvp.weaponType)} size={44} showTier={false} />
+                ) : null}
+                <div>
+                  <p className="font-display text-2xl font-bold text-white">{mvp.name}</p>
+                  <p className="text-xs text-[#8b95a8]">
+                    {mvp.guildName || mvp.role || "—"}
+                    {mvp.allianceName ? ` · ${mvp.allianceName}` : ""}
+                  </p>
+                </div>
               </div>
               <div className="flex gap-4 text-right">
                 <div>

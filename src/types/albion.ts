@@ -9,7 +9,10 @@ export type EquipmentSlot =
   | "MainHand"
   | "OffHand"
   | "Cape"
-  | "Bag";
+  | "Bag"
+  | "Mount"
+  | "Potion"
+  | "Food";
 
 export interface EquipmentItem {
   type: string;
@@ -41,6 +44,8 @@ export interface KillEvent {
   victimEquipment: Partial<Record<EquipmentSlot, EquipmentItem | null>>;
   lootable: EquipmentItem[];
   trash: EquipmentItem[];
+  /** Inventario soulbound / no dropea (p.ej. Tomes NONTRADABLE) */
+  bound?: EquipmentItem[];
   lootedBy?: {
     playerName: string;
     guildName?: string | null;
@@ -61,7 +66,7 @@ export interface LootClaim {
   timestamp: string;
   /** víctima de la baja que generó el drop */
   victimName?: string;
-  kind?: "lootable" | "trash";
+  kind?: "lootable" | "trash" | "bound";
 }
 
 export interface PartyMemberStats {
@@ -74,6 +79,8 @@ export interface PartyMemberStats {
   damage: number;
   heal?: number;
   ip?: number;
+  /** MainHand visto en kills/deaths de la pelea */
+  weaponType?: string | null;
   isOnline: boolean;
   role?: string;
   guildName?: string | null;
@@ -224,6 +231,9 @@ export interface AlbionApiPlayer {
     Shoes?: AlbionApiItem | null;
     Cape?: AlbionApiItem | null;
     Bag?: AlbionApiItem | null;
+    Mount?: AlbionApiItem | null;
+    Potion?: AlbionApiItem | null;
+    Food?: AlbionApiItem | null;
   };
   Inventory?: (AlbionApiItem | null)[];
 }

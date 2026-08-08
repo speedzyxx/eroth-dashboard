@@ -29,7 +29,7 @@ import {
   PARTY_SIZE,
   SERVER_BASE,
 } from "@/lib/config";
-import { makeItem, prettyItemName, sanitizeItemType, tierLabelFromType } from "@/lib/format";
+import { makeItem, prettyItemName, sanitizeItemType, tierLabelFromType, isNonDropLootItem } from "@/lib/format";
 import { getMockDashboard } from "@/data/mockDashboard";
 import type {
   AlbionApiEvent,
@@ -149,7 +149,18 @@ function mapEquipment(
   equipment?: AlbionApiPlayer["Equipment"],
 ): KillEvent["victimEquipment"] {
   if (!equipment) return {};
-  const slots: EquipmentSlot[] = ["Head", "Armor", "Shoes", "MainHand", "OffHand", "Cape", "Bag"];
+  const slots: EquipmentSlot[] = [
+    "Head",
+    "Armor",
+    "Shoes",
+    "MainHand",
+    "OffHand",
+    "Cape",
+    "Bag",
+    "Mount",
+    "Potion",
+    "Food",
+  ];
   const out: KillEvent["victimEquipment"] = {};
   for (const slot of slots) {
     out[slot] = mapApiItem(equipment[slot] ?? null);
@@ -158,29 +169,55 @@ function mapEquipment(
 }
 
 /**
- * Heurística de loot: Inventory del Victim son piezas lootables;
- * equipo equipado sin aparecer en inventory se trata como trash.
+ * Inventory = lootable; soulbound (NONTRADABLE) = bound; resto equipo = trash.
  */
 function splitLoot(victim: AlbionApiPlayer): {
   lootable: EquipmentItem[];
   trash: EquipmentItem[];
+  bound: EquipmentItem[];
 } {
-  const inventory = (victim.Inventory ?? [])
+  const inventoryAll = (victim.Inventory ?? [])
     .map(mapApiItem)
     .filter((i): i is EquipmentItem => Boolean(i));
 
-  const equipped = Object.values(victim.Equipment ?? {})
-    .map(mapApiItem)
-    .filter((i): i is EquipmentItem => Boolean(i));
+  const lootable: EquipmentItem[] = [];
+  const bound: EquipmentItem[] = [];
+  for (const item of inventoryAll) {
+    if (isNonDropLootItem(item.type)) bound.push(item);
+    else lootable.push(item);
+  }
 
-  const lootTypes = new Set(inventory.map((i) => i.type));
-  const trash = equipped.filter((i) => !lootTypes.has(i.type));
+  const remaining = new Map<string, number>();
+  for (const item of lootable) {
+    remaining.set(item.type, (remaining.get(item.type) || 0) + (item.count || 1));
+  }
 
-  return { lootable: inventory.length ? inventory : [], trash };
+  const slots: EquipmentSlot[] = [
+    "Head",
+    "Armor",
+    "Shoes",
+    "MainHand",
+    "OffHand",
+    "Cape",
+    "Bag",
+    "Mount",
+    "Potion",
+    "Food",
+  ];
+  const trash: EquipmentItem[] = [];
+  for (const slot of slots) {
+    const eq = mapApiItem(victim.Equipment?.[slot] ?? null);
+    if (!eq) continue;
+    const left = remaining.get(eq.type) || 0;
+    if (left > 0) remaining.set(eq.type, left - 1);
+    else trash.push(eq);
+  }
+
+  return { lootable, trash, bound };
 }
 
 export function mapApiEventToKill(event: AlbionApiEvent): KillEvent {
-  const { lootable, trash } = splitLoot(event.Victim);
+  const { lootable, trash, bound } = splitLoot(event.Victim);
   return {
     id: String(event.EventId),
     timestamp: event.TimeStamp,
@@ -192,6 +229,7 @@ export function mapApiEventToKill(event: AlbionApiEvent): KillEvent {
     victimEquipment: mapEquipment(event.Victim.Equipment),
     lootable,
     trash,
+    bound,
     participants: event.Participants?.length ?? event.groupMemberCount,
   };
 }

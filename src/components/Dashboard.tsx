@@ -24,7 +24,7 @@ function battleToDashboard(battle: BattleDetail): DashboardData {
   const home = battle.players.filter((p) => p.isHome);
   const enemies = battle.players.filter((p) => !p.isHome);
   const allyLootClaims = battle.lootClaims.filter((c) => {
-    if (c.kind === "trash") return false;
+    if (c.kind === "trash" || c.kind === "bound") return false;
     const killer = battle.players.find((p) => p.name === c.playerName);
     return killer?.isHome || home.some((h) => h.name === c.playerName);
   });
@@ -38,11 +38,12 @@ function battleToDashboard(battle: BattleDetail): DashboardData {
       deaths: p.deaths,
       assistFame: p.fame,
       lootValue: battle.lootClaims
-        .filter((c) => c.playerName === p.name && c.kind !== "trash")
+        .filter((c) => c.playerName === p.name && c.kind !== "trash" && c.kind !== "bound")
         .reduce((s, c) => s + c.estimatedSilver, 0),
       damage: p.damage,
       heal: p.heal,
       ip: p.ip ?? undefined,
+      weaponType: p.weaponType ?? null,
       isOnline: true,
       role: p.guildName || undefined,
       guildName: p.guildName,

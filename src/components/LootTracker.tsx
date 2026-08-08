@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Box, Camera, Package, Search, Trash2, Upload } from "lucide-react";
+import { Box, Camera, Lock, Package, Search, Trash2, Upload } from "lucide-react";
 import { ItemIcon } from "@/components/ui/ItemIcon";
 import { formatSilver, formatTimeAgo } from "@/lib/format";
 import { isHomeSide } from "@/lib/roster";
@@ -23,7 +23,7 @@ interface ChestStack {
 
 function buildAllyChest(claims: LootClaim[]): ChestStack[] {
   const allyLoot = claims.filter((c) => {
-    if (c.kind === "trash") return false;
+    if (c.kind === "trash" || c.kind === "bound") return false;
     return isHomeSide({
       guildName: c.guildName,
       allianceName: c.allianceName,
@@ -67,7 +67,7 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [previews, setPreviews] = useState<{ name: string; url: string }[]>([]);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "lootable" | "trash">("all");
+  const [filter, setFilter] = useState<"all" | "lootable" | "trash" | "bound">("all");
 
   const chest = useMemo(() => buildAllyChest(claims), [claims]);
   const chestValue = useMemo(
@@ -76,19 +76,37 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
   );
 
   const lootableClaims = useMemo(
-    () => claims.filter((c) => c.kind !== "trash"),
+    () => claims.filter((c) => c.kind === "lootable" || (!c.kind)),
     [claims],
   );
   const trashClaims = useMemo(
     () => claims.filter((c) => c.kind === "trash"),
     [claims],
   );
+  const boundClaims = useMemo(
+    () => claims.filter((c) => c.kind === "bound"),
+    [claims],
+  );
+
+  const coverage = useMemo(() => {
+    const withLootable = kills.filter((k) => k.lootable.length > 0).length;
+    const withAny = kills.filter(
+      (k) => k.lootable.length > 0 || k.trash.length > 0 || (k.bound?.length ?? 0) > 0,
+    ).length;
+    const empty = kills.length - withAny;
+    const lootablePieces = lootableClaims.reduce((s, c) => s + (c.item.count || 1), 0);
+    const trashPieces = trashClaims.reduce((s, c) => s + (c.item.count || 1), 0);
+    const boundPieces = boundClaims.reduce((s, c) => s + (c.item.count || 1), 0);
+    return { withLootable, withAny, empty, lootablePieces, trashPieces, boundPieces };
+  }, [kills, lootableClaims, trashClaims, boundClaims]);
 
   const filteredClaims = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return claims.filter((c) => {
       if (filter === "lootable" && c.kind === "trash") return false;
+      if (filter === "lootable" && c.kind === "bound") return false;
       if (filter === "trash" && c.kind !== "trash") return false;
+      if (filter === "bound" && c.kind !== "bound") return false;
       if (!needle) return true;
       const blob = [
         c.playerName,
@@ -117,6 +135,29 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
 
   return (
     <section className="relative z-10 space-y-4">
+      <div className="rounded-xl border border-[#2a3344] bg-[#12171f] px-4 py-3 text-xs text-[#9ca3af]">
+        <p className="font-medium text-[#e8edf5]">Cobertura de loot (API Gameinfo)</p>
+        <p className="mt-1">
+          {kills.length} bajas · {coverage.lootablePieces} lootable · {coverage.trashPieces} trash
+          {coverage.boundPieces > 0 ? (
+            <span className="text-[#c4b5fd]">
+              {" "}
+              · {coverage.boundPieces} soulbound (no dropean)
+            </span>
+          ) : null}
+          {coverage.empty > 0 ? (
+            <span className="text-[#fbbf24]">
+              {" "}
+              · {coverage.empty} sin inventario
+            </span>
+          ) : null}
+        </p>
+        <p className="mt-1 text-[11px] text-[#6b7280]">
+          Tomes of Insight soulbound (T5–T8, etc.) la API los lista pero no se lotean — van a
+          Bound. Adept T4 sí es tradeable. Looter = killer (prioridad).
+        </p>
+      </div>
+
       <div className="rounded-2xl border border-[#d97706]/35 bg-gradient-to-b from-[#1a1510] to-[#16181d] p-4 sm:p-5">
         <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
           <div className="flex items-start gap-3">
@@ -182,6 +223,7 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
             <h2 className="font-display text-lg font-semibold text-white">Ledger completo</h2>
             <p className="text-xs text-[#8b95a8]">
               {kills.length} bajas · {lootableClaims.length} lootable · {trashClaims.length} trash
+              {boundClaims.length ? ` · ${boundClaims.length} bound` : ""}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -194,7 +236,7 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
                 className="w-48 rounded-md border border-[#2a3344] bg-[#0f1218] py-1.5 pl-7 pr-2 text-xs text-white outline-none focus:border-[#d97706]/40"
               />
             </div>
-            {(["all", "lootable", "trash"] as const).map((f) => (
+            {(["all", "lootable", "trash", "bound"] as const).map((f) => (
               <button
                 key={f}
                 type="button"
@@ -205,7 +247,7 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
                     : "border-[#2a3344] text-[#8b95a8]"
                 }`}
               >
-                {f === "all" ? "Todo" : f}
+                {f === "all" ? "Todo" : f === "bound" ? "Bound" : f}
               </button>
             ))}
           </div>
@@ -241,13 +283,21 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
                       className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
                         claim.kind === "trash"
                           ? "bg-[#7f1d1d]/40 text-[#f87171]"
-                          : "bg-teal-500/15 text-[#5eead4]"
+                          : claim.kind === "bound"
+                            ? "bg-violet-500/15 text-[#c4b5fd]"
+                            : "bg-teal-500/15 text-[#5eead4]"
                       }`}
                     >
-                      {claim.kind === "trash" ? "Trash" : "Lootable"}
+                      {claim.kind === "trash"
+                        ? "Trash"
+                        : claim.kind === "bound"
+                          ? "Bound"
+                          : "Lootable"}
                     </span>
                   </td>
-                  <td className="px-2 py-2 font-semibold text-[#f59e0b]">{claim.playerName}</td>
+                  <td className="px-2 py-2 font-semibold text-[#f59e0b]">
+                    {claim.kind === "bound" ? "—" : claim.playerName}
+                  </td>
                   <td className="px-2 py-2 text-[#9ca3af]">
                     {claim.guildName || "Sin gremio"}
                     {claim.allianceName ? (
@@ -256,7 +306,9 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
                   </td>
                   <td className="px-2 py-2 text-[#f87171]">{claim.victimName || "—"}</td>
                   <td className="px-2 py-2 tabular-nums text-[#86efac]">
-                    {claim.kind === "trash" ? "—" : `~${formatSilver(claim.estimatedSilver)}`}
+                    {claim.kind === "trash" || claim.kind === "bound"
+                      ? "—"
+                      : `~${formatSilver(claim.estimatedSilver)}`}
                   </td>
                   <td className="px-2 py-2 text-[#6b7280]">{formatTimeAgo(claim.timestamp)}</td>
                 </tr>
@@ -292,7 +344,8 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
                 <span className="ml-1 text-[#5b6578]">[{kill.victim.guildName || "—"}]</span>
               </p>
               <p className="text-[11px] text-[#6b7280]">
-                {kill.lootable.length} lootable · {kill.trash.length} trash ·{" "}
+                {kill.lootable.length} lootable · {kill.trash.length} trash
+                {(kill.bound?.length ?? 0) > 0 ? ` · ${kill.bound!.length} bound` : ""} ·{" "}
                 {formatTimeAgo(kill.timestamp)}
               </p>
             </div>
@@ -317,6 +370,18 @@ export function LootTracker({ kills, claims }: LootTrackerProps) {
                   )}
                 </div>
               </div>
+              {(kill.bound?.length ?? 0) > 0 && (
+                <div>
+                  <p className="mb-1.5 inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-[#c4b5fd]">
+                    <Lock className="h-3.5 w-3.5" /> Bound / no dropea ({kill.bound!.length})
+                  </p>
+                  <div className="flex flex-wrap gap-1.5 opacity-70">
+                    {kill.bound!.map((item, i) => (
+                      <ItemIcon key={`${kill.id}-b-${item.type}-${i}`} item={item} size={48} />
+                    ))}
+                  </div>
+                </div>
+              )}
               <div>
                 <p className="mb-1.5 inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-[#f87171]">
                   <Trash2 className="h-3.5 w-3.5" /> Trash ({kill.trash.length})

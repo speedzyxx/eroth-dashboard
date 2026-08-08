@@ -24,6 +24,7 @@ import {
   prettyItemName,
   sanitizeItemType,
   tierLabelFromType,
+  isNonDropLootItem,
 } from "@/lib/format";
 import type {
   AlbionApiBattle,
@@ -162,33 +163,69 @@ function mapApiItem(item: AlbionApiItem | null | undefined): EquipmentItem | nul
   };
 }
 
+const EQUIP_SLOTS: EquipmentSlot[] = [
+  "Head",
+  "Armor",
+  "Shoes",
+  "MainHand",
+  "OffHand",
+  "Cape",
+  "Bag",
+  "Mount",
+  "Potion",
+  "Food",
+];
+
 function mapEquipment(
   equipment?: AlbionApiPlayer["Equipment"],
 ): KillEvent["victimEquipment"] {
   if (!equipment) return {};
-  const slots: EquipmentSlot[] = ["Head", "Armor", "Shoes", "MainHand", "OffHand", "Cape", "Bag"];
   const out: KillEvent["victimEquipment"] = {};
-  for (const slot of slots) {
+  for (const slot of EQUIP_SLOTS) {
     out[slot] = mapApiItem(equipment[slot] ?? null);
   }
   return out;
 }
 
+/**
+ * Inventory = lootable (drops reales).
+ * Bound = soulbound en inventory (API los lista pero no dropean).
+ * Trash = equipo que no aparece en inventory lootable.
+ */
 function splitLoot(victim: AlbionApiPlayer): {
   lootable: EquipmentItem[];
   trash: EquipmentItem[];
+  bound: EquipmentItem[];
 } {
-  const inventory = (victim.Inventory ?? [])
+  const inventoryAll = (victim.Inventory ?? [])
     .map(mapApiItem)
     .filter((i): i is EquipmentItem => Boolean(i));
 
-  const equipped = Object.values(victim.Equipment ?? {})
-    .map(mapApiItem)
-    .filter((i): i is EquipmentItem => Boolean(i));
+  const lootable: EquipmentItem[] = [];
+  const bound: EquipmentItem[] = [];
+  for (const item of inventoryAll) {
+    if (isNonDropLootItem(item.type)) bound.push(item);
+    else lootable.push(item);
+  }
 
-  const lootTypes = new Set(inventory.map((i) => i.type));
-  const trash = equipped.filter((i) => !lootTypes.has(i.type));
-  return { lootable: inventory, trash };
+  const remaining = new Map<string, number>();
+  for (const item of lootable) {
+    remaining.set(item.type, (remaining.get(item.type) || 0) + (item.count || 1));
+  }
+
+  const trash: EquipmentItem[] = [];
+  for (const slot of EQUIP_SLOTS) {
+    const eq = mapApiItem(victim.Equipment?.[slot] ?? null);
+    if (!eq) continue;
+    const left = remaining.get(eq.type) || 0;
+    if (left > 0) {
+      remaining.set(eq.type, left - 1);
+    } else {
+      trash.push(eq);
+    }
+  }
+
+  return { lootable, trash, bound };
 }
 
 function mapPlayerRef(p: AlbionApiPlayer): PlayerRef {
@@ -202,7 +239,7 @@ function mapPlayerRef(p: AlbionApiPlayer): PlayerRef {
 }
 
 export function mapApiEventToKill(event: AlbionApiEvent): KillEvent {
-  const { lootable, trash } = splitLoot(event.Victim);
+  const { lootable, trash, bound } = splitLoot(event.Victim);
   const killerGuild = event.Killer.GuildName ?? null;
   const killerAlliance = event.Killer.AllianceName ?? null;
   return {
@@ -217,7 +254,8 @@ export function mapApiEventToKill(event: AlbionApiEvent): KillEvent {
     victimEquipment: mapEquipment(event.Victim.Equipment),
     lootable,
     trash,
-    // Un registro por cada pieza lootable (quién mató = quién tiene prioridad de loot)
+    bound,
+    // Solo lootable real (no soulbound)
     lootedBy: lootable.map((item) => ({
       playerName: event.Killer.Name,
       guildName: killerGuild,
@@ -233,22 +271,38 @@ async function getPlayerEvents(
   kind: "kills" | "deaths",
   server?: AlbionServer,
 ): Promise<AlbionApiEvent[]> {
-  try {
-    return await fetchJson<AlbionApiEvent[]>(
-      `/players/${playerId}/${kind}?offset=0&limit=50`,
-      server,
-    );
-  } catch {
-    return [];
+  const pages: AlbionApiEvent[] = [];
+  // Hasta 100 eventos recientes por jugador (ZvZ grandes)
+  for (const offset of [0, 50]) {
+    try {
+      const batch = await fetchJson<AlbionApiEvent[]>(
+        `/players/${playerId}/${kind}?offset=${offset}&limit=50`,
+        server,
+      );
+      pages.push(...batch);
+      if (batch.length < 50) break;
+    } catch {
+      break;
+    }
   }
+  return pages;
+}
+
+function inventoryHasItems(event: AlbionApiEvent): boolean {
+  return (event.Victim.Inventory ?? []).some((i) => Boolean(i?.Type));
 }
 
 async function enrichEvent(
   event: AlbionApiEvent,
   server?: AlbionServer,
 ): Promise<AlbionApiEvent> {
-  const hasInv = (event.Victim.Inventory?.length ?? 0) > 0;
-  const hasEquip = Boolean(event.Victim.Equipment?.MainHand || event.Victim.Equipment?.Armor);
+  const hasInv = inventoryHasItems(event);
+  const hasEquip = Boolean(
+    event.Victim.Equipment?.MainHand ||
+      event.Victim.Equipment?.Armor ||
+      event.Victim.Equipment?.Head,
+  );
+  // Lista truncada / vacía → pedir detalle completo del event
   if (hasInv && hasEquip) return event;
   try {
     return await fetchJson<AlbionApiEvent>(`/events/${event.EventId}`, server);
@@ -279,11 +333,12 @@ async function mapPool<T, R>(
 /**
  * Carga kills/deaths de la batalla:
  * todos los jugadores con actividad, en lotes (evita 504 del Gameinfo).
+ * Devuelve también eventos crudos (armas / IP / dmg).
  */
 export async function fetchBattleKillEvents(
   battle: AlbionApiBattle,
   server?: AlbionServer,
-): Promise<KillEvent[]> {
+): Promise<{ kills: KillEvent[]; rawEvents: AlbionApiEvent[] }> {
   const battleId = String(battle.id);
   const players = values(battle.players);
 
@@ -328,9 +383,12 @@ export async function fetchBattleKillEvents(
     return rich;
   });
 
-  return [...byId.values()]
+  const rawEvents = [...byId.values()];
+  const kills = rawEvents
     .map(mapApiEventToKill)
     .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
+
+  return { kills, rawEvents };
 }
 
 function estimateSilver(item: EquipmentItem): number {
@@ -339,7 +397,7 @@ function estimateSilver(item: EquipmentItem): number {
   return Math.round(80_000 * tier * (1 + enchant) * (item.quality || 1) * (item.count || 1));
 }
 
-/** Ledger completo de la pelea: cada lootable + trash de cada kill */
+/** Ledger completo: lootable + trash + bound (soulbound, no dropea) */
 function buildClaims(kills: KillEvent[]): LootClaim[] {
   const claims: LootClaim[] = [];
   for (const k of kills) {
@@ -371,9 +429,26 @@ function buildClaims(kills: KillEvent[]): LootClaim[] {
         kind: "trash",
       });
     }
+    for (const [idx, item] of (k.bound ?? []).entries()) {
+      claims.push({
+        id: `${k.id}-bound-${idx}`,
+        playerName: k.killer.name,
+        guildName: k.killer.guildName,
+        allianceName: k.killer.allianceName ?? null,
+        item,
+        estimatedSilver: 0,
+        killEventId: k.id,
+        timestamp: k.timestamp,
+        victimName: k.victim.name,
+        kind: "bound",
+      });
+    }
   }
   return claims.sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === "lootable" ? -1 : 1;
+    const order = { lootable: 0, trash: 1, bound: 2 } as const;
+    const ao = order[a.kind || "lootable"] ?? 0;
+    const bo = order[b.kind || "lootable"] ?? 0;
+    if (ao !== bo) return ao - bo;
     return b.estimatedSilver - a.estimatedSilver || +new Date(b.timestamp) - +new Date(a.timestamp);
   });
 }
@@ -408,6 +483,14 @@ function toPlayerRow(
   };
 }
 
+function setWeapon(map: Map<string, string>, playerId: string, type?: string | null) {
+  if (!playerId || !type) return;
+  const clean = sanitizeItemType(type);
+  if (!clean) return;
+  // Preferir la primera arma vista en pelea (participantes/killer); víctima solo fallback
+  if (!map.has(playerId)) map.set(playerId, clean);
+}
+
 function mergeEventStats(
   players: BattlePlayerRow[],
   kills: KillEvent[],
@@ -417,23 +500,42 @@ function mergeEventStats(
   const heal = new Map<string, number>();
   const ip = new Map<string, number>();
   const weapon = new Map<string, string>();
+  const victimWeapon = new Map<string, string>();
 
   for (const ev of rawEvents) {
-    for (const part of ev.Participants ?? [ev.Killer]) {
+    const parts = ev.Participants?.length ? ev.Participants : [ev.Killer];
+    for (const part of parts) {
       if (!part?.Id) continue;
       dmg.set(part.Id, (dmg.get(part.Id) || 0) + (part.DamageDone || 0));
       heal.set(part.Id, (heal.get(part.Id) || 0) + (part.SupportHealingDone || 0));
       if (part.AverageItemPower) ip.set(part.Id, part.AverageItemPower);
-      const w = part.Equipment?.MainHand?.Type;
-      if (w) weapon.set(part.Id, w);
+      setWeapon(weapon, part.Id, part.Equipment?.MainHand?.Type);
+    }
+
+    if (ev.Killer?.Id) {
+      setWeapon(weapon, ev.Killer.Id, ev.Killer.Equipment?.MainHand?.Type);
+      if (ev.Killer.AverageItemPower) ip.set(ev.Killer.Id, ev.Killer.AverageItemPower);
+    }
+
+    // Loadout al morir = mejor fallback para enemigos sin kills
+    if (ev.Victim?.Id) {
+      setWeapon(victimWeapon, ev.Victim.Id, ev.Victim.Equipment?.MainHand?.Type);
+      if (ev.Victim.AverageItemPower && !ip.has(ev.Victim.Id)) {
+        ip.set(ev.Victim.Id, ev.Victim.AverageItemPower);
+      }
     }
   }
 
-  // Fallback damage from mapped kills
+  for (const [id, w] of victimWeapon) {
+    setWeapon(weapon, id, w);
+  }
+
   for (const k of kills) {
     if (k.totalDamage) {
       dmg.set(k.killer.id, Math.max(dmg.get(k.killer.id) || 0, k.totalDamage));
     }
+    const victimMain = k.victimEquipment?.MainHand?.type;
+    if (victimMain) setWeapon(weapon, k.victim.id, victimMain);
   }
 
   return players.map((p) => ({
@@ -457,17 +559,9 @@ export async function fetchBattleDetail(
   let killEvents: KillEvent[] = [];
   let rawKillEvents: AlbionApiEvent[] = [];
   try {
-    killEvents = await fetchBattleKillEvents(battle, server);
-    // Re-fetch raw for participant stats (best-effort)
-    rawKillEvents = await Promise.all(
-      killEvents.slice(0, 20).map(async (k) => {
-        try {
-          return await fetchJson<AlbionApiEvent>(`/events/${k.id}`, server);
-        } catch {
-          return null as unknown as AlbionApiEvent;
-        }
-      }),
-    ).then((list) => list.filter(Boolean));
+    const fetched = await fetchBattleKillEvents(battle, server);
+    killEvents = fetched.kills;
+    rawKillEvents = fetched.rawEvents;
   } catch (err) {
     console.warn("[battleService] kills fetch failed", err);
   }
