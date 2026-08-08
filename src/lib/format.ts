@@ -64,11 +64,12 @@ export function tierLabelFromType(type: string): string {
 
 /**
  * Ítems que la API mete en Inventory pero NO dropean al morir.
- * Tomes of Insight soulbound = SKILLBOOK_NONTRADABLE (excepto Adept T4, tradeable).
+ * Todos los *NONTRADABLE* (incl. tomes con sello rojo) → bound.
+ * Adept lootable moderno = T4_SKILLBOOK_STANDARD (si aparece).
  */
 export function isNonDropLootItem(type: string): boolean {
   const t = sanitizeItemType(type).toUpperCase();
-  if (/^T4_SKILLBOOK_NONTRADABLE/.test(t)) return false; // Adept's Tome — tradeable
+  if (/SKILLBOOK_STANDARD/.test(t)) return false;
   if (/SKILLBOOK_NONTRADABLE/.test(t)) return true;
   if (/_NONTRADABLE/.test(t)) return true;
   return false;

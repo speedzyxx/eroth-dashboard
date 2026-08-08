@@ -145,13 +145,31 @@ export function Dashboard() {
   const loadBattle = useCallback(async (id: string, live: boolean) => {
     const seq = ++requestSeq.current;
     setSelectedId(id);
-    setBattle(null);
     setDetailLoading(true);
     setEnriching(false);
     setError(null);
 
+    const cacheKey = `eroth-battle-v2-${id}`;
+
+    // Cache local = casi instantáneo al reabrir la misma pelea
     try {
-      // 1) Roster rápido → UI al instante
+      const raw = sessionStorage.getItem(cacheKey);
+      if (raw) {
+        const cached = JSON.parse(raw) as BattleDetail;
+        if (String(cached.id) === String(id) && !cached.partial && (cached.kills?.length ?? 0) > 0) {
+          setBattle(cached);
+          setDetailLoading(false);
+        } else {
+          setBattle(null);
+        }
+      } else {
+        setBattle(null);
+      }
+    } catch {
+      setBattle(null);
+    }
+
+    try {
       const liteRes = await fetch(`/api/battles/${id}?live=${live ? "1" : "0"}&lite=1`, {
         cache: "no-store",
       });
@@ -164,20 +182,31 @@ export function Dashboard() {
       if (String(lite.id) !== String(id)) {
         throw new Error(`Batalla incorrecta: API devolvió ${lite.id}, pedimos ${id}`);
       }
-      setBattle(lite);
+      setBattle((prev) =>
+        prev && String(prev.id) === String(id) && (prev.kills?.length ?? 0) > 0 ? prev : lite,
+      );
       setDetailLoading(false);
-      if (lite.warning) setError(lite.warning);
 
       if (!live) return;
 
-      // 2) Kills / loot / armas en segundo plano
+      // Rápido: kills aliadas → cofre
       setEnriching(true);
+      const fastRes = await fetch(`/api/battles/${id}?live=1&fast=1`, { cache: "no-store" });
+      if (seq !== requestSeq.current) return;
+      if (fastRes.ok) {
+        const fast = (await fastRes.json()) as BattleDetail;
+        if (String(fast.id) === String(id)) {
+          setBattle(fast);
+        }
+      }
+
+      // Completo: enemigos + más armas (usa cache server si ya se cargó)
       const fullRes = await fetch(`/api/battles/${id}?live=1`, { cache: "no-store" });
       if (seq !== requestSeq.current) return;
       if (!fullRes.ok) {
         const body = (await fullRes.json().catch(() => null)) as { error?: string } | null;
         setError(
-          `${body?.error || `HTTP ${fullRes.status}`} — roster OK; reintenta kills abajo.`,
+          `${body?.error || `HTTP ${fullRes.status}`} — ya tienes loot rápido; reintenta el resto.`,
         );
         return;
       }
@@ -185,17 +214,19 @@ export function Dashboard() {
       if (seq !== requestSeq.current) return;
       if (String(full.id) !== String(id)) return;
       setBattle(full);
+      try {
+        sessionStorage.setItem(cacheKey, JSON.stringify(full));
+      } catch {
+        /* quota */
+      }
       if (full.warning || full.truncated) {
         setError(full.warning || "Carga parcial: priorizamos loot aliado.");
+      } else {
+        setError(null);
       }
     } catch (e) {
       if (seq !== requestSeq.current) return;
-      // Si ya hay lite, no borrar roster
-      setError(
-        e instanceof Error
-          ? `${e.message}`
-          : "Error cargando batalla",
-      );
+      setError(e instanceof Error ? e.message : "Error cargando batalla");
     } finally {
       if (seq === requestSeq.current) {
         setDetailLoading(false);

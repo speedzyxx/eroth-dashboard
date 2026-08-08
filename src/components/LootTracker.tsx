@@ -191,8 +191,8 @@ export function LootTracker({ kills, claims, homePlayers, loading }: LootTracker
           ) : null}
         </p>
         <p className="mt-1 text-[11px] text-[#6b7280]">
-          Tomes of Insight soulbound (T5–T8, etc.) la API los lista pero no se lotean — van a
-          Bound. Adept T4 sí es tradeable. Looter = killer (prioridad).
+          Tomes con sello rojo (<span className="text-[#c4b5fd]">NONTRADABLE</span>) no dropean →
+          Bound. Solo entra lootable real al cofre. Batallas ya vistas cargan de cache.
         </p>
       </div>
 

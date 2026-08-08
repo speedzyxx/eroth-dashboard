@@ -45,8 +45,9 @@ import type {
   PlayerRef,
 } from "@/types/albion";
 
-const DEFAULT_TIMEOUT_MS = 14_000;
-const KILL_FETCH_BUDGET_MS = 38_000;
+const DEFAULT_TIMEOUT_MS = 12_000;
+const KILL_FETCH_BUDGET_MS = 28_000;
+const FAST_KILL_BUDGET_MS = 14_000;
 
 function baseUrl(server?: AlbionServer): string {
   return SERVER_BASE[server ?? getServer()];
@@ -353,15 +354,18 @@ function isEventHomeSide(ev: AlbionApiEvent): boolean {
 
 /**
  * Kills de la pelea con presupuesto de tiempo (evita 503 en Render).
- * Prioridad: kills aliados → deaths aliados → enemigos → enrich inventarios home.
+ * mode=fast → solo kills aliados (+ enrich inventarios faltantes), para cofre rápido.
  */
 export async function fetchBattleKillEvents(
   battle: AlbionApiBattle,
   server?: AlbionServer,
+  opts?: { mode?: "fast" | "full" },
 ): Promise<{ kills: KillEvent[]; rawEvents: AlbionApiEvent[]; truncated?: boolean }> {
+  const mode = opts?.mode ?? "full";
   const battleId = String(battle.id);
   const players = values(battle.players);
-  const deadline = Date.now() + KILL_FETCH_BUDGET_MS;
+  const budget = mode === "fast" ? FAST_KILL_BUDGET_MS : KILL_FETCH_BUDGET_MS;
+  const deadline = Date.now() + budget;
   const timeLeft = () => deadline - Date.now();
   let truncated = false;
 
@@ -375,8 +379,9 @@ export async function fetchBattleKillEvents(
     });
 
   const homeKillers = active.filter((p) => isHomePlayer(p) && (p.kills || 0) > 0);
-  const homeDeaths = active.filter((p) => isHomePlayer(p) && (p.deaths || 0) > 0);
-  const enemyActive = active.filter((p) => !isHomePlayer(p)).slice(0, 20);
+  const homeDeaths =
+    mode === "full" ? active.filter((p) => isHomePlayer(p) && (p.deaths || 0) > 0) : [];
+  const enemyActive = mode === "full" ? active.filter((p) => !isHomePlayer(p)).slice(0, 18) : [];
 
   const byId = new Map<number, AlbionApiEvent>();
 
@@ -385,12 +390,12 @@ export async function fetchBattleKillEvents(
     kinds: ("kills" | "deaths")[],
     concurrency: number,
   ) {
-    if (timeLeft() < 2500) {
+    if (timeLeft() < 2000) {
       truncated = true;
       return;
     }
     await mapPool(list, concurrency, async (p) => {
-      if (timeLeft() < 2000) {
+      if (timeLeft() < 1500) {
         truncated = true;
         return;
       }
@@ -411,37 +416,24 @@ export async function fetchBattleKillEvents(
     });
   }
 
-  // 1) Kills aliados primero = loot del cofre
-  await ingest(homeKillers, ["kills"], 12);
-  // 2) Deaths aliados = armas al morir
-  await ingest(homeDeaths, ["deaths"], 10);
-  // 3) Enemigos (killboard / armas enemigas) si queda tiempo
-  if (timeLeft() > 8000) {
-    await ingest(enemyActive, ["kills", "deaths"], 8);
-  } else {
-    truncated = true;
+  await ingest(homeKillers, ["kills"], 14);
+  if (mode === "full") {
+    await ingest(homeDeaths, ["deaths"], 10);
+    if (timeLeft() > 6000) await ingest(enemyActive, ["kills", "deaths"], 8);
+    else truncated = true;
   }
 
   const eventList = [...byId.values()];
 
-  // 4) Enrich: inventarios de kills aliadas (loot) + armas participantes
+  // Enrich solo inventarios vacíos de kills aliadas (cofre)
   const homeKillsNeedLoot = eventList
     .filter((e) => isHomeKiller(e) && !inventoryHasItems(e))
-    .slice(0, 45);
-  const homeNeedGear = eventList
-    .filter(
-      (e) =>
-        isEventHomeSide(e) &&
-        eventNeedsEnrich(e) &&
-        !homeKillsNeedLoot.some((x) => x.EventId === e.EventId),
-    )
-    .slice(0, 25);
-  const toEnrich = [...homeKillsNeedLoot, ...homeNeedGear];
+    .slice(0, mode === "fast" ? 24 : 40);
 
-  if (timeLeft() > 3000 && toEnrich.length) {
-    const enrichCap = Math.max(8, Math.min(toEnrich.length, Math.floor(timeLeft() / 400)));
-    await mapPool(toEnrich.slice(0, enrichCap), 10, async (ev) => {
-      if (timeLeft() < 1500) {
+  if (timeLeft() > 2500 && homeKillsNeedLoot.length) {
+    const enrichCap = Math.max(6, Math.min(homeKillsNeedLoot.length, Math.floor(timeLeft() / 350)));
+    await mapPool(homeKillsNeedLoot.slice(0, enrichCap), 12, async (ev) => {
+      if (timeLeft() < 1200) {
         truncated = true;
         return ev;
       }
@@ -449,9 +441,22 @@ export async function fetchBattleKillEvents(
       byId.set(rich.EventId, rich);
       return rich;
     });
-    if (enrichCap < toEnrich.length) truncated = true;
-  } else if (toEnrich.length) {
+    if (enrichCap < homeKillsNeedLoot.length) truncated = true;
+  } else if (homeKillsNeedLoot.length) {
     truncated = true;
+  }
+
+  // Full: un poco de enrich extra para armas (participantes)
+  if (mode === "full" && timeLeft() > 4000) {
+    const gear = eventList
+      .filter((e) => isEventHomeSide(e) && eventNeedsEnrich(e) && inventoryHasItems(e))
+      .slice(0, 15);
+    await mapPool(gear, 8, async (ev) => {
+      if (timeLeft() < 1200) return ev;
+      const rich = await enrichEvent(ev, server);
+      byId.set(rich.EventId, rich);
+      return rich;
+    });
   }
 
   const rawEvents = [...byId.values()];
@@ -733,20 +738,19 @@ export async function fetchBattleDetailLite(
   return assembleBattleDetail(battle, [], [], { partial: true });
 }
 
-/**
- * Tras lite: carga kills priorizando aliados y respeta presupuesto de tiempo.
- */
 export async function fetchBattleDetail(
   battleId: string | number,
   server?: AlbionServer,
+  opts?: { mode?: "fast" | "full" },
 ): Promise<BattleDetail> {
+  const mode = opts?.mode ?? "full";
   const battle = await getBattleRaw(battleId, server);
 
   let killEvents: KillEvent[] = [];
   let rawKillEvents: AlbionApiEvent[] = [];
   let truncated = false;
   try {
-    const fetched = await fetchBattleKillEvents(battle, server);
+    const fetched = await fetchBattleKillEvents(battle, server, { mode });
     killEvents = fetched.kills;
     rawKillEvents = fetched.rawEvents;
     truncated = Boolean(fetched.truncated);
@@ -765,7 +769,7 @@ export async function fetchBattleDetail(
   ).length;
 
   return assembleBattleDetail(battle, killEvents, rawKillEvents, {
-    partial: false,
+    partial: mode === "fast",
     truncated,
     warning: truncated
       ? `Carga parcial (${killEvents.length} events, ${homeKillCount} kills aliadas). Reintenta si falta loot.`
