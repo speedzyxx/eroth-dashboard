@@ -198,6 +198,8 @@ export interface BattleDetail {
   leaderName: string;
   source: "mock" | "live";
   lastUpdated: string;
+  /** true = solo roster; kills/loot/armas aún cargando */
+  partial?: boolean;
 }
 
 /** Forma cruda aproximada de un event de Gameinfo API */

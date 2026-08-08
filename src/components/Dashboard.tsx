@@ -12,7 +12,7 @@ import { GathererMascot } from "@/components/GathererMascot";
 import { useLiveApiDefault } from "@/lib/config";
 import { BATTLE_EXAMPLE_ID, LEADER_NAME } from "@/lib/roster";
 import { classifyWeaponRole } from "@/lib/weaponRoles";
-import { getMockBattleDetail, getMockBattleList } from "@/data/mockBattles";
+import { getMockBattleList } from "@/data/mockBattles";
 import type {
   BattleDetail,
   BattleListItem,
@@ -91,13 +91,13 @@ export function Dashboard() {
   const [battle, setBattle] = useState<BattleDetail | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [enriching, setEnriching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [minPlayers, setMinPlayers] = useState(10);
   const [minHome, setMinHome] = useState(1);
   const [manualId, setManualId] = useState("");
   const requestSeq = useRef(0);
 
-  /** Solo datos de la batalla actualmente seleccionada (evita mezcla entre peleas) */
   const activeBattle =
     battle && selectedId && String(battle.id) === String(selectedId) ? battle : null;
 
@@ -134,22 +134,43 @@ export function Dashboard() {
     setSelectedId(id);
     setBattle(null);
     setDetailLoading(true);
+    setEnriching(false);
     setError(null);
+
     try {
-      const res = await fetch(`/api/battles/${id}?live=${live ? "1" : "0"}`, {
+      // 1) Roster rápido → UI al instante
+      const liteRes = await fetch(`/api/battles/${id}?live=${live ? "1" : "0"}&lite=1`, {
         cache: "no-store",
       });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error || `HTTP ${res.status}`);
+      if (!liteRes.ok) {
+        const body = (await liteRes.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || `HTTP ${liteRes.status}`);
       }
-      const json = (await res.json()) as BattleDetail & { warning?: string };
-      if (seq !== requestSeq.current) return; // respuesta vieja
-      if (String(json.id) !== String(id)) {
-        throw new Error(`Batalla incorrecta: API devolvió ${json.id}, pedimos ${id}`);
+      const lite = (await liteRes.json()) as BattleDetail & { warning?: string };
+      if (seq !== requestSeq.current) return;
+      if (String(lite.id) !== String(id)) {
+        throw new Error(`Batalla incorrecta: API devolvió ${lite.id}, pedimos ${id}`);
       }
-      setBattle(json);
-      if (json.warning) setError(json.warning);
+      setBattle(lite);
+      setDetailLoading(false);
+      if (lite.warning) setError(lite.warning);
+
+      if (!live) return;
+
+      // 2) Kills / loot / armas en segundo plano
+      setEnriching(true);
+      const fullRes = await fetch(`/api/battles/${id}?live=1`, { cache: "no-store" });
+      if (seq !== requestSeq.current) return;
+      if (!fullRes.ok) {
+        const body = (await fullRes.json().catch(() => null)) as { error?: string } | null;
+        setError(body?.error || `Kills/loot: HTTP ${fullRes.status}`);
+        return;
+      }
+      const full = (await fullRes.json()) as BattleDetail & { warning?: string };
+      if (seq !== requestSeq.current) return;
+      if (String(full.id) !== String(id)) return;
+      setBattle(full);
+      if (full.warning) setError(full.warning);
     } catch (e) {
       if (seq !== requestSeq.current) return;
       setBattle(null);
@@ -159,7 +180,10 @@ export function Dashboard() {
           : "Error cargando batalla",
       );
     } finally {
-      if (seq === requestSeq.current) setDetailLoading(false);
+      if (seq === requestSeq.current) {
+        setDetailLoading(false);
+        setEnriching(false);
+      }
     }
   }, []);
 
@@ -169,7 +193,6 @@ export function Dashboard() {
 
   useEffect(() => {
     if (selectedId) void loadBattle(selectedId, liveEnabled);
-    // solo al montar / cambiar live
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveEnabled]);
 
@@ -222,7 +245,7 @@ export function Dashboard() {
             source={data.source}
             lastUpdated={data.lastUpdated}
             liveEnabled={liveEnabled}
-            loading={listLoading || detailLoading}
+            loading={listLoading || detailLoading || enriching}
             onToggleLive={() => setLiveEnabled((v) => !v)}
           />
         )}
@@ -239,6 +262,12 @@ export function Dashboard() {
         </p>
 
         <AppTabs active={tab} onChange={goTab} battleLabel={selectedId} />
+
+        {enriching && activeBattle && (
+          <p className="relative z-10 mb-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
+            Cargando kills, loot y armas en segundo plano… Resumen y roster ya disponibles.
+          </p>
+        )}
 
         {error && (
           <p className="relative z-10 mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
@@ -283,9 +312,7 @@ export function Dashboard() {
           {tab !== "battles" && detailLoading && (
             <div className="rounded-2xl border border-[#2a3344] bg-[#16181d] px-4 py-16 text-center">
               <p className="font-display text-lg text-white">Cargando batalla {selectedId}…</p>
-              <p className="mt-2 text-xs text-[#8b95a8]">
-                Resumen, Killboard, Loot y Party se actualizan juntos cuando termina la carga.
-              </p>
+              <p className="mt-2 text-xs text-[#8b95a8]">Roster primero (~1–3s), luego kills/loot.</p>
             </div>
           )}
 

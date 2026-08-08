@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMockBattleDetail } from "@/data/mockBattles";
 import { BATTLE_EXAMPLE_ID } from "@/lib/roster";
-import { fetchBattleDetail } from "@/services/battleService";
+import { fetchBattleDetail, fetchBattleDetailLite } from "@/services/battleService";
 
 export const maxDuration = 60;
 
 /**
- * GET /api/battles/[id]?live=1
- * Detalle de batalla + kills/loot. Nunca sustituye otra pelea en mock.
+ * GET /api/battles/[id]?live=1&lite=1
+ * lite=1 → solo roster (rápido). Sin lite → kills/loot/armas.
  */
 export async function GET(
   req: NextRequest,
@@ -15,6 +15,7 @@ export async function GET(
 ) {
   const { id } = await ctx.params;
   const live = req.nextUrl.searchParams.get("live") !== "0";
+  const lite = req.nextUrl.searchParams.get("lite") === "1";
 
   if (!id || !/^\d+$/.test(id)) {
     return NextResponse.json({ error: "Invalid battle id" }, { status: 400 });
@@ -31,10 +32,11 @@ export async function GET(
           { status: 404 },
         );
       }
-      return NextResponse.json(getMockBattleDetail(id));
+      const mock = getMockBattleDetail(id);
+      return NextResponse.json(lite ? { ...mock, partial: true, kills: [], lootClaims: [] } : mock);
     }
 
-    const detail = await fetchBattleDetail(id);
+    const detail = lite ? await fetchBattleDetailLite(id) : await fetchBattleDetail(id);
     if (String(detail.id) !== String(id)) {
       return NextResponse.json(
         { error: `ID mismatch: expected ${id}, got ${detail.id}` },
@@ -46,7 +48,7 @@ export async function GET(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Live battle failed";
-    console.error("[api/battles/id]", id, message);
+    console.error("[api/battles/id]", id, lite ? "lite" : "full", message);
     return NextResponse.json(
       {
         error: message,

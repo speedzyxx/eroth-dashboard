@@ -271,21 +271,15 @@ async function getPlayerEvents(
   kind: "kills" | "deaths",
   server?: AlbionServer,
 ): Promise<AlbionApiEvent[]> {
-  const pages: AlbionApiEvent[] = [];
-  // Hasta 100 eventos recientes por jugador (ZvZ grandes)
-  for (const offset of [0, 50]) {
-    try {
-      const batch = await fetchJson<AlbionApiEvent[]>(
-        `/players/${playerId}/${kind}?offset=${offset}&limit=50`,
-        server,
-      );
-      pages.push(...batch);
-      if (batch.length < 50) break;
-    } catch {
-      break;
-    }
+  // 1 página = suficiente y mucho más rápido (ZvZ recientes suelen estar en los últimos 50)
+  try {
+    return await fetchJson<AlbionApiEvent[]>(
+      `/players/${playerId}/${kind}?offset=0&limit=50`,
+      server,
+    );
+  } catch {
+    return [];
   }
-  return pages;
 }
 
 function inventoryHasItems(event: AlbionApiEvent): boolean {
@@ -296,7 +290,6 @@ function eventNeedsEnrich(event: AlbionApiEvent): boolean {
   if (!inventoryHasItems(event)) return true;
   if (!event.Killer?.Equipment?.MainHand?.Type) return true;
   if (!event.Victim?.Equipment?.MainHand?.Type) return true;
-  // Participantes sin arma = huecos en compo (aliados 0/0 que solo asistieron)
   const parts = event.Participants ?? [];
   if (parts.some((p) => p?.Id && !p.Equipment?.MainHand?.Type)) return true;
   return false;
@@ -333,27 +326,30 @@ async function mapPool<T, R>(
   return results;
 }
 
-async function fetchGuildTopEvents(
-  guildId: string,
-  battleId: string,
-  server?: AlbionServer,
-): Promise<AlbionApiEvent[]> {
-  try {
-    const list = await fetchJson<AlbionApiEvent[]>(
-      `/guilds/${guildId}/top?range=week&offset=0&limit=50`,
-      server,
-    );
-    return list.filter((ev) => String(ev.BattleId) === battleId);
-  } catch {
-    return [];
-  }
+function isEventHomeSide(ev: AlbionApiEvent): boolean {
+  return (
+    isHomePlayer({
+      allianceId: ev.Killer.AllianceId,
+      allianceName: ev.Killer.AllianceName,
+      guildId: ev.Killer.GuildId,
+      guildName: ev.Killer.GuildName,
+      id: ev.Killer.Id,
+    }) ||
+    isHomePlayer({
+      allianceId: ev.Victim.AllianceId,
+      allianceName: ev.Victim.AllianceName,
+      guildId: ev.Victim.GuildId,
+      guildName: ev.Victim.GuildName,
+      id: ev.Victim.Id,
+    })
+  );
 }
 
 /**
- * Carga kills de la batalla desde varias fuentes Gameinfo:
- * 1) kills/deaths de cada jugador con actividad
- * 2) top kills de cada gremio home en la pelea
- * 3) enrich selectivo de /events/{id} (loot + armas de participantes)
+ * Kills de la pelea — optimizado para velocidad:
+ * - todos los aliados con K/D
+ * - top enemigos por actividad (cap)
+ * - enrich limitado (prioriza home / loot)
  */
 export async function fetchBattleKillEvents(
   battle: AlbionApiBattle,
@@ -362,7 +358,7 @@ export async function fetchBattleKillEvents(
   const battleId = String(battle.id);
   const players = values(battle.players);
 
-  const candidates = players
+  const active = players
     .filter((p) => (p.kills || 0) > 0 || (p.deaths || 0) > 0)
     .sort((a, b) => {
       const aHome = isHomePlayer(a) ? 1 : 0;
@@ -371,95 +367,37 @@ export async function fetchBattleKillEvents(
       return b.kills + b.deaths - (a.kills + a.deaths);
     });
 
-  // También pedir historial a aliados 0/0 (a veces el summary llega desfasado)
-  const homeZero = players.filter(
-    (p) => isHomePlayer(p) && (p.kills || 0) === 0 && (p.deaths || 0) === 0,
-  );
-  const fetchTargets = [...candidates, ...homeZero];
+  const homeActive = active.filter(isHomePlayer);
+  const enemyActive = active.filter((p) => !isHomePlayer(p)).slice(0, 24);
+  const fetchTargets = [...homeActive, ...enemyActive];
 
   const byId = new Map<number, AlbionApiEvent>();
 
-  await mapPool(fetchTargets, 8, async (p) => {
+  await mapPool(fetchTargets, 10, async (p) => {
     const tasks: Promise<AlbionApiEvent[]>[] = [];
-    if ((p.kills || 0) > 0 || isHomePlayer(p)) {
-      tasks.push(getPlayerEvents(p.id, "kills", server));
-    }
-    if ((p.deaths || 0) > 0 || isHomePlayer(p)) {
-      tasks.push(getPlayerEvents(p.id, "deaths", server));
-    }
+    if ((p.kills || 0) > 0) tasks.push(getPlayerEvents(p.id, "kills", server));
+    if ((p.deaths || 0) > 0) tasks.push(getPlayerEvents(p.id, "deaths", server));
     if (!tasks.length) return;
     const batches = await Promise.all(tasks);
     for (const list of batches) {
       for (const ev of list) {
-        if (String(ev.BattleId) === battleId) {
-          byId.set(ev.EventId, ev);
-        }
+        if (String(ev.BattleId) === battleId) byId.set(ev.EventId, ev);
       }
     }
   });
 
-  // Fuente extra: top kills de gremios aliados en la pelea
-  const homeGuildIds = [
-    ...new Set(
-      players
-        .filter(isHomePlayer)
-        .map((p) => p.guildId)
-        .filter((id): id is string => Boolean(id)),
-    ),
-  ].slice(0, 8);
-
-  await mapPool(homeGuildIds, 3, async (guildId) => {
-    const extras = await fetchGuildTopEvents(guildId, battleId, server);
-    for (const ev of extras) byId.set(ev.EventId, ev);
-  });
-
   const eventList = [...byId.values()].sort((a, b) => {
-    // Enrich primero eventos con killer/victim home (loot + compo aliada)
-    const aHome =
-      isHomePlayer({
-        allianceId: a.Killer.AllianceId,
-        allianceName: a.Killer.AllianceName,
-        guildId: a.Killer.GuildId,
-        guildName: a.Killer.GuildName,
-        id: a.Killer.Id,
-      }) ||
-      isHomePlayer({
-        allianceId: a.Victim.AllianceId,
-        allianceName: a.Victim.AllianceName,
-        guildId: a.Victim.GuildId,
-        guildName: a.Victim.GuildName,
-        id: a.Victim.Id,
-      })
-        ? 1
-        : 0;
-    const bHome =
-      isHomePlayer({
-        allianceId: b.Killer.AllianceId,
-        allianceName: b.Killer.AllianceName,
-        guildId: b.Killer.GuildId,
-        guildName: b.Killer.GuildName,
-        id: b.Killer.Id,
-      }) ||
-      isHomePlayer({
-        allianceId: b.Victim.AllianceId,
-        allianceName: b.Victim.AllianceName,
-        guildId: b.Victim.GuildId,
-        guildName: b.Victim.GuildName,
-        id: b.Victim.Id,
-      })
-        ? 1
-        : 0;
+    const aHome = isEventHomeSide(a) ? 1 : 0;
+    const bHome = isEventHomeSide(b) ? 1 : 0;
     if (aHome !== bHome) return bHome - aHome;
-    return eventNeedsEnrich(a) === eventNeedsEnrich(b)
-      ? 0
-      : eventNeedsEnrich(a)
-        ? -1
-        : 1;
+    const aNeed = eventNeedsEnrich(a) ? 1 : 0;
+    const bNeed = eventNeedsEnrich(b) ? 1 : 0;
+    return bNeed - aNeed;
   });
 
-  // Cap de enrich para no timeout en Render; priorizados arriba
-  const toEnrich = eventList.filter(eventNeedsEnrich).slice(0, 120);
-  await mapPool(toEnrich, 10, async (ev) => {
+  // Cap bajo: armas ya suelen venir en Killer/Victim de la lista
+  const toEnrich = eventList.filter(eventNeedsEnrich).slice(0, 40);
+  await mapPool(toEnrich, 12, async (ev) => {
     const rich = await enrichEvent(ev, server);
     byId.set(rich.EventId, rich);
     return rich;
@@ -643,24 +581,15 @@ function mergeEventStats(
   }));
 }
 
-export async function fetchBattleDetail(
-  battleId: string | number,
-  server?: AlbionServer,
-): Promise<BattleDetail> {
-  const battle = await getBattleRaw(battleId, server);
+function assembleBattleDetail(
+  battle: AlbionApiBattle,
+  killEvents: KillEvent[],
+  rawKillEvents: AlbionApiEvent[],
+  opts?: { partial?: boolean },
+): BattleDetail {
   const rawPlayers = values(battle.players);
   const rawGuilds = values(battle.guilds);
   const rawAlliances = values(battle.alliances);
-
-  let killEvents: KillEvent[] = [];
-  let rawKillEvents: AlbionApiEvent[] = [];
-  try {
-    const fetched = await fetchBattleKillEvents(battle, server);
-    killEvents = fetched.kills;
-    rawKillEvents = fetched.rawEvents;
-  } catch (err) {
-    console.warn("[battleService] kills fetch failed", err);
-  }
 
   let players = rawPlayers
     .map((p) => toPlayerRow(p))
@@ -710,15 +639,13 @@ export async function fetchBattleDetail(
     })
     .sort((a, b) => b.fame - a.fame);
 
-  // Jugadores sin alianza también cuentan en tablas vía guilds
-
+  const sortedKills = [...killEvents].sort(
+    (a, b) => +new Date(b.timestamp) - +new Date(a.timestamp),
+  );
   const byKills = [...players].sort((a, b) => b.kills - a.kills || b.fame - a.fame);
   const byFameDeath = [...players].filter((p) => p.deaths > 0).sort((a, b) => b.fame - a.fame);
   const byDmg = [...players].sort((a, b) => b.damage - a.damage);
   const byHeal = [...players].sort((a, b) => b.heal - a.heal);
-
-  // Fix sort bug in killEvents - I used a.startTime incorrectly
-  killEvents = killEvents.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
 
   return {
     id: String(battle.id),
@@ -737,12 +664,41 @@ export async function fetchBattleDetail(
       topDamage: byDmg.find((p) => p.damage > 0) ?? null,
       topHeal: byHeal.find((p) => p.heal > 0) ?? null,
     },
-    kills: killEvents,
-    lootClaims: buildClaims(killEvents),
+    kills: sortedKills,
+    lootClaims: buildClaims(sortedKills),
     homeAlliance: HOME_ALLIANCE_NAME,
     homeGuild: HOME_GUILD_NAME,
     leaderName: LEADER_NAME,
     source: "live",
     lastUpdated: new Date().toISOString(),
+    partial: opts?.partial ?? false,
   };
+}
+
+/** Solo roster (1 request Gameinfo) — UI inmediata */
+export async function fetchBattleDetailLite(
+  battleId: string | number,
+  server?: AlbionServer,
+): Promise<BattleDetail> {
+  const battle = await getBattleRaw(battleId, server);
+  return assembleBattleDetail(battle, [], [], { partial: true });
+}
+
+export async function fetchBattleDetail(
+  battleId: string | number,
+  server?: AlbionServer,
+): Promise<BattleDetail> {
+  const battle = await getBattleRaw(battleId, server);
+
+  let killEvents: KillEvent[] = [];
+  let rawKillEvents: AlbionApiEvent[] = [];
+  try {
+    const fetched = await fetchBattleKillEvents(battle, server);
+    killEvents = fetched.kills;
+    rawKillEvents = fetched.rawEvents;
+  } catch (err) {
+    console.warn("[battleService] kills fetch failed", err);
+  }
+
+  return assembleBattleDetail(battle, killEvents, rawKillEvents, { partial: false });
 }
