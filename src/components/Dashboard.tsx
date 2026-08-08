@@ -11,6 +11,7 @@ import { PartyStats } from "@/components/PartyStats";
 import { GathererMascot } from "@/components/GathererMascot";
 import { useLiveApiDefault } from "@/lib/config";
 import { BATTLE_EXAMPLE_ID, LEADER_NAME } from "@/lib/roster";
+import { classifyWeaponRole } from "@/lib/weaponRoles";
 import { getMockBattleDetail, getMockBattleList } from "@/data/mockBattles";
 import type {
   BattleDetail,
@@ -44,6 +45,7 @@ function battleToDashboard(battle: BattleDetail): DashboardData {
       heal: p.heal,
       ip: p.ip ?? undefined,
       weaponType: p.weaponType ?? null,
+      weaponRole: classifyWeaponRole(p.weaponType),
       isOnline: true,
       role: p.guildName || undefined,
       guildName: p.guildName,

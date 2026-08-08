@@ -81,6 +81,8 @@ export interface PartyMemberStats {
   ip?: number;
   /** MainHand visto en kills/deaths de la pelea */
   weaponType?: string | null;
+  /** tank | healer | support | dps | unknown */
+  weaponRole?: string | null;
   isOnline: boolean;
   role?: string;
   guildName?: string | null;

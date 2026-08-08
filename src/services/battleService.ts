@@ -288,22 +288,12 @@ async function getPlayerEvents(
   return pages;
 }
 
-function inventoryHasItems(event: AlbionApiEvent): boolean {
-  return (event.Victim.Inventory ?? []).some((i) => Boolean(i?.Type));
-}
-
 async function enrichEvent(
   event: AlbionApiEvent,
   server?: AlbionServer,
 ): Promise<AlbionApiEvent> {
-  const hasInv = inventoryHasItems(event);
-  const hasEquip = Boolean(
-    event.Victim.Equipment?.MainHand ||
-      event.Victim.Equipment?.Armor ||
-      event.Victim.Equipment?.Head,
-  );
-  // Lista truncada / vacía → pedir detalle completo del event
-  if (hasInv && hasEquip) return event;
+  // Siempre pedir detalle: la lista omite MainHand de Killer/Participants
+  // y deja media pelea en "Sin arma registrada".
   try {
     return await fetchJson<AlbionApiEvent>(`/events/${event.EventId}`, server);
   } catch {
@@ -483,12 +473,27 @@ function toPlayerRow(
   };
 }
 
-function setWeapon(map: Map<string, string>, playerId: string, type?: string | null) {
+function voteWeapon(
+  votes: Map<string, Map<string, number>>,
+  playerId: string,
+  type?: string | null,
+  weight = 1,
+) {
   if (!playerId || !type) return;
   const clean = sanitizeItemType(type);
   if (!clean) return;
-  // Preferir la primera arma vista en pelea (participantes/killer); víctima solo fallback
-  if (!map.has(playerId)) map.set(playerId, clean);
+  let bag = votes.get(playerId);
+  if (!bag) {
+    bag = new Map();
+    votes.set(playerId, bag);
+  }
+  bag.set(clean, (bag.get(clean) || 0) + weight);
+}
+
+function pickWeapon(votes: Map<string, Map<string, number>>, playerId: string): string | null {
+  const bag = votes.get(playerId);
+  if (!bag?.size) return null;
+  return [...bag.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
 }
 
 function mergeEventStats(
@@ -499,35 +504,34 @@ function mergeEventStats(
   const dmg = new Map<string, number>();
   const heal = new Map<string, number>();
   const ip = new Map<string, number>();
-  const weapon = new Map<string, string>();
-  const victimWeapon = new Map<string, string>();
+  const weaponVotes = new Map<string, Map<string, number>>();
 
   for (const ev of rawEvents) {
-    const parts = ev.Participants?.length ? ev.Participants : [ev.Killer];
+    const parts = ev.Participants?.length ? ev.Participants : [];
     for (const part of parts) {
       if (!part?.Id) continue;
       dmg.set(part.Id, (dmg.get(part.Id) || 0) + (part.DamageDone || 0));
       heal.set(part.Id, (heal.get(part.Id) || 0) + (part.SupportHealingDone || 0));
       if (part.AverageItemPower) ip.set(part.Id, part.AverageItemPower);
-      setWeapon(weapon, part.Id, part.Equipment?.MainHand?.Type);
+      // Participante = loadout en pelea (peso alto)
+      voteWeapon(weaponVotes, part.Id, part.Equipment?.MainHand?.Type, 3);
     }
 
     if (ev.Killer?.Id) {
-      setWeapon(weapon, ev.Killer.Id, ev.Killer.Equipment?.MainHand?.Type);
+      voteWeapon(weaponVotes, ev.Killer.Id, ev.Killer.Equipment?.MainHand?.Type, 4);
       if (ev.Killer.AverageItemPower) ip.set(ev.Killer.Id, ev.Killer.AverageItemPower);
+      if (ev.Killer.DamageDone) {
+        dmg.set(ev.Killer.Id, (dmg.get(ev.Killer.Id) || 0) + (ev.Killer.DamageDone || 0));
+      }
     }
 
-    // Loadout al morir = mejor fallback para enemigos sin kills
+    // Víctima: loadout al morir (peso medio; cubre enemigos sin kills)
     if (ev.Victim?.Id) {
-      setWeapon(victimWeapon, ev.Victim.Id, ev.Victim.Equipment?.MainHand?.Type);
+      voteWeapon(weaponVotes, ev.Victim.Id, ev.Victim.Equipment?.MainHand?.Type, 2);
       if (ev.Victim.AverageItemPower && !ip.has(ev.Victim.Id)) {
         ip.set(ev.Victim.Id, ev.Victim.AverageItemPower);
       }
     }
-  }
-
-  for (const [id, w] of victimWeapon) {
-    setWeapon(weapon, id, w);
   }
 
   for (const k of kills) {
@@ -535,7 +539,7 @@ function mergeEventStats(
       dmg.set(k.killer.id, Math.max(dmg.get(k.killer.id) || 0, k.totalDamage));
     }
     const victimMain = k.victimEquipment?.MainHand?.type;
-    if (victimMain) setWeapon(weapon, k.victim.id, victimMain);
+    if (victimMain) voteWeapon(weaponVotes, k.victim.id, victimMain, 2);
   }
 
   return players.map((p) => ({
@@ -543,7 +547,7 @@ function mergeEventStats(
     damage: dmg.get(p.id) || p.damage,
     heal: heal.get(p.id) || p.heal,
     ip: ip.get(p.id) ?? p.ip,
-    weaponType: weapon.get(p.id) ?? p.weaponType,
+    weaponType: pickWeapon(weaponVotes, p.id) ?? p.weaponType,
   }));
 }
 
