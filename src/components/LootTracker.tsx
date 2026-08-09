@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Box, Camera, Loader2, Lock, Package, Search, Trash2, Upload } from "lucide-react";
 import { ItemIcon } from "@/components/ui/ItemIcon";
-import { formatSilver, formatTimeAgo } from "@/lib/format";
+import { formatSilver, formatTimeAgo, isNonDropLootItem } from "@/lib/format";
 import { isHomeSide } from "@/lib/roster";
 import type { BattlePlayerRow, EquipmentItem, KillEvent, LootClaim } from "@/types/albion";
 
@@ -26,6 +26,8 @@ interface ChestStack {
 
 function isAllyClaim(c: LootClaim, homePlayers: BattlePlayerRow[]): boolean {
   if (c.kind === "trash" || c.kind === "bound") return false;
+  // Cofres UNIQUE_LOOTCHEST* y soulbound (🚫 en ícono) nunca van al cofre
+  if (isNonDropLootItem(c.item.type)) return false;
 
   if (
     isHomeSide({

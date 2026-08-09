@@ -63,15 +63,22 @@ export function tierLabelFromType(type: string): string {
 }
 
 /**
- * Ítems que la API mete en Inventory pero NO dropean al morir.
- * Todos los *NONTRADABLE* (incl. tomes con sello rojo) → bound.
- * Adept lootable moderno = T4_SKILLBOOK_STANDARD (si aparece).
+ * Ítems en Inventory de la API que NO se pueden lotear (mano roja / soulbound / event).
+ * - *NONTRADABLE*
+ * - cofres UNIQUE_LOOTCHEST* (icono con 🚫)
+ * - vanity / furniture / trophies
+ * - ids sin tier T# (basura de parseo)
  */
 export function isNonDropLootItem(type: string): boolean {
   const t = sanitizeItemType(type).toUpperCase();
+  if (!t) return true;
   if (/SKILLBOOK_STANDARD/.test(t)) return false;
   if (/SKILLBOOK_NONTRADABLE/.test(t)) return true;
   if (/_NONTRADABLE/.test(t)) return true;
+  if (/LOOTCHEST/.test(t)) return true;
+  if (/FURNITUREITEM|TROPHY|VANITY|UNIQUE_SHOES_RRF|UNIQUE_ARMOR_RRF/.test(t)) return true;
+  // Tipos raros sin T#: suele ser unique event no lootable
+  if (!/^T\d+_/.test(t) && /UNIQUE_/.test(t)) return true;
   return false;
 }
 

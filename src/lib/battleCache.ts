@@ -18,8 +18,7 @@ function store(): Map<string, CacheEntry> {
 export function getCachedBattle(id: string): BattleDetail | null {
   const hit = store().get(String(id));
   if (!hit) return null;
-  // Full (con kills) vive 6h; lite no se cachea aquí
-  if (hit.detail.partial) return null;
+  if (!(hit.detail.kills?.length > 0)) return null;
   if (Date.now() - hit.savedAt > 6 * 60 * 60_000) {
     store().delete(String(id));
     return null;
@@ -28,6 +27,6 @@ export function getCachedBattle(id: string): BattleDetail | null {
 }
 
 export function setCachedBattle(detail: BattleDetail): void {
-  if (detail.partial) return;
+  if (!(detail.kills?.length > 0)) return;
   store().set(String(detail.id), { detail, savedAt: Date.now() });
 }

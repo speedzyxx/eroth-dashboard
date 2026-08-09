@@ -45,18 +45,29 @@ import type {
   PlayerRef,
 } from "@/types/albion";
 
-const DEFAULT_TIMEOUT_MS = 12_000;
-const KILL_FETCH_BUDGET_MS = 28_000;
-const FAST_KILL_BUDGET_MS = 14_000;
+const DEFAULT_TIMEOUT_MS = 22_000;
+const FAST_KILL_BUDGET_MS = 16_000;
+const FULL_KILL_BUDGET_MS = 22_000;
 
 function baseUrl(server?: AlbionServer): string {
   return SERVER_BASE[server ?? getServer()];
 }
 
-async function fetchJson<T>(path: string, server?: AlbionServer): Promise<T> {
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && (/aborted|AbortError/i.test(err.message) || err.name === "AbortError"))
+  );
+}
+
+async function fetchJson<T>(
+  path: string,
+  server?: AlbionServer,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
   const url = `${baseUrl(server)}${path}`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
@@ -65,6 +76,11 @@ async function fetchJson<T>(path: string, server?: AlbionServer): Promise<T> {
     });
     if (!res.ok) throw new Error(`Albion API ${res.status}: ${url}`);
     return (await res.json()) as T;
+  } catch (err) {
+    if (isAbortError(err)) {
+      throw new Error("Timeout Gameinfo (lento). Pulsa Reintentar.");
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -150,7 +166,17 @@ export async function getBattleRaw(
   battleId: string | number,
   server?: AlbionServer,
 ): Promise<AlbionApiBattle> {
-  return fetchJson<AlbionApiBattle>(`/battles/${battleId}`, server);
+  const path = `/battles/${battleId}`;
+  try {
+    return await fetchJson<AlbionApiBattle>(path, server, 25_000);
+  } catch (err) {
+    // Un reintento: Gameinfo a veces aborta bajo carga
+    if (isAbortError(err) || (err instanceof Error && /Timeout|503|429/.test(err.message))) {
+      await new Promise((r) => setTimeout(r, 400));
+      return fetchJson<AlbionApiBattle>(path, server, 28_000);
+    }
+    throw err;
+  }
 }
 
 function mapApiItem(item: AlbionApiItem | null | undefined): EquipmentItem | null {
@@ -364,7 +390,7 @@ export async function fetchBattleKillEvents(
   const mode = opts?.mode ?? "full";
   const battleId = String(battle.id);
   const players = values(battle.players);
-  const budget = mode === "fast" ? FAST_KILL_BUDGET_MS : KILL_FETCH_BUDGET_MS;
+  const budget = mode === "fast" ? FAST_KILL_BUDGET_MS : FULL_KILL_BUDGET_MS;
   const deadline = Date.now() + budget;
   const timeLeft = () => deadline - Date.now();
   let truncated = false;
@@ -416,7 +442,7 @@ export async function fetchBattleKillEvents(
     });
   }
 
-  await ingest(homeKillers, ["kills"], 14);
+  await ingest(homeKillers, ["kills"], mode === "fast" ? 10 : 12);
   if (mode === "full") {
     await ingest(homeDeaths, ["deaths"], 10);
     if (timeLeft() > 6000) await ingest(enemyActive, ["kills", "deaths"], 8);
@@ -431,8 +457,11 @@ export async function fetchBattleKillEvents(
     .slice(0, mode === "fast" ? 24 : 40);
 
   if (timeLeft() > 2500 && homeKillsNeedLoot.length) {
-    const enrichCap = Math.max(6, Math.min(homeKillsNeedLoot.length, Math.floor(timeLeft() / 350)));
-    await mapPool(homeKillsNeedLoot.slice(0, enrichCap), 12, async (ev) => {
+    const enrichCap = Math.max(
+      4,
+      Math.min(homeKillsNeedLoot.length, mode === "fast" ? 16 : Math.floor(timeLeft() / 350)),
+    );
+    await mapPool(homeKillsNeedLoot.slice(0, enrichCap), mode === "fast" ? 8 : 10, async (ev) => {
       if (timeLeft() < 1200) {
         truncated = true;
         return ev;

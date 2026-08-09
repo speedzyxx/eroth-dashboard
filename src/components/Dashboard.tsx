@@ -10,6 +10,7 @@ import { LootTracker } from "@/components/LootTracker";
 import { PartyStats } from "@/components/PartyStats";
 import { GathererMascot } from "@/components/GathererMascot";
 import { useLiveApiDefault } from "@/lib/config";
+import { isNonDropLootItem } from "@/lib/format";
 import { BATTLE_EXAMPLE_ID, LEADER_NAME, isHomeSide } from "@/lib/roster";
 import { classifyWeaponRole } from "@/lib/weaponRoles";
 import { getMockBattleList } from "@/data/mockBattles";
@@ -26,6 +27,7 @@ function battleToDashboard(battle: BattleDetail): DashboardData {
   const enemies = battle.players.filter((p) => !p.isHome);
   const allyLootClaims = battle.lootClaims.filter((c) => {
     if (c.kind === "trash" || c.kind === "bound") return false;
+    if (isNonDropLootItem(c.item.type)) return false;
     if (
       isHomeSide({
         id: c.playerId,
@@ -149,24 +151,26 @@ export function Dashboard() {
     setEnriching(false);
     setError(null);
 
-    const cacheKey = `eroth-battle-v2-${id}`;
+    const cacheKey = `eroth-battle-v3-${id}`;
+    let hadCache = false;
 
-    // Cache local = casi instantáneo al reabrir la misma pelea
+    // Cache local = instantáneo al reabrir (acepta fast/partial si hay kills)
     try {
       const raw = sessionStorage.getItem(cacheKey);
       if (raw) {
         const cached = JSON.parse(raw) as BattleDetail;
-        if (String(cached.id) === String(id) && !cached.partial && (cached.kills?.length ?? 0) > 0) {
+        if (String(cached.id) === String(id) && (cached.kills?.length ?? 0) > 0) {
           setBattle(cached);
           setDetailLoading(false);
-        } else {
-          setBattle(null);
+          hadCache = true;
         }
-      } else {
-        setBattle(null);
       }
     } catch {
-      setBattle(null);
+      /* ignore */
+    }
+
+    if (!hadCache) {
+      setBattle((prev) => (prev && String(prev.id) === String(id) ? prev : null));
     }
 
     try {
@@ -189,44 +193,35 @@ export function Dashboard() {
 
       if (!live) return;
 
-      // Rápido: kills aliadas → cofre
+      // Solo fase rápida (kills aliadas → cofre). Sin fase full (era lo que abortaba).
       setEnriching(true);
       const fastRes = await fetch(`/api/battles/${id}?live=1&fast=1`, { cache: "no-store" });
       if (seq !== requestSeq.current) return;
-      if (fastRes.ok) {
-        const fast = (await fastRes.json()) as BattleDetail;
-        if (String(fast.id) === String(id)) {
-          setBattle(fast);
-        }
-      }
-
-      // Completo: enemigos + más armas (usa cache server si ya se cargó)
-      const fullRes = await fetch(`/api/battles/${id}?live=1`, { cache: "no-store" });
-      if (seq !== requestSeq.current) return;
-      if (!fullRes.ok) {
-        const body = (await fullRes.json().catch(() => null)) as { error?: string } | null;
+      if (!fastRes.ok) {
+        const body = (await fastRes.json().catch(() => null)) as { error?: string } | null;
         setError(
-          `${body?.error || `HTTP ${fullRes.status}`} — ya tienes loot rápido; reintenta el resto.`,
+          `${body?.error || `HTTP ${fastRes.status}`} — roster listo; reintenta el loot.`,
         );
         return;
       }
-      const full = (await fullRes.json()) as BattleDetail & { warning?: string };
+      const fast = (await fastRes.json()) as BattleDetail & { warning?: string };
       if (seq !== requestSeq.current) return;
-      if (String(full.id) !== String(id)) return;
-      setBattle(full);
+      if (String(fast.id) !== String(id)) return;
+      setBattle(fast);
       try {
-        sessionStorage.setItem(cacheKey, JSON.stringify(full));
+        sessionStorage.setItem(cacheKey, JSON.stringify(fast));
       } catch {
         /* quota */
       }
-      if (full.warning || full.truncated) {
-        setError(full.warning || "Carga parcial: priorizamos loot aliado.");
+      if (fast.warning || fast.truncated) {
+        setError(fast.warning || "Carga parcial: priorizamos loot aliado.");
       } else {
         setError(null);
       }
     } catch (e) {
       if (seq !== requestSeq.current) return;
-      setError(e instanceof Error ? e.message : "Error cargando batalla");
+      const msg = e instanceof Error ? e.message : "Error cargando batalla";
+      setError(/aborted/i.test(msg) ? "Timeout Gameinfo (lento). Pulsa Reintentar." : msg);
     } finally {
       if (seq === requestSeq.current) {
         setDetailLoading(false);
@@ -378,7 +373,20 @@ export function Dashboard() {
 
           {tab !== "battles" && !detailLoading && !detailReady && (
             <div className="rounded-2xl border border-[#2a3344] bg-[#16181d] px-4 py-16 text-center text-sm text-[#8b95a8]">
-              Elige una batalla en la pestaña Batallas.
+              {selectedId ? (
+                <>
+                  <p>No se pudo cargar la batalla {selectedId}.</p>
+                  <button
+                    type="button"
+                    onClick={() => void loadBattle(selectedId, liveEnabled)}
+                    className="mt-3 rounded-lg border border-[#d97706]/40 bg-[#d97706]/15 px-3 py-1.5 text-xs font-medium text-[#fbbf24] hover:bg-[#d97706]/25"
+                  >
+                    Reintentar
+                  </button>
+                </>
+              ) : (
+                <p>Elige una batalla en la pestaña Batallas.</p>
+              )}
             </div>
           )}
 

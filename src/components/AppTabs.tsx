@@ -8,6 +8,7 @@ import {
   Trophy,
   Users,
 } from "lucide-react";
+import { UtcClock } from "@/components/UtcClock";
 
 export type AppTab = "battles" | "overview" | "kills" | "loot" | "party";
 
@@ -56,11 +57,14 @@ export function AppTabs({ active, onChange, battleLabel }: AppTabsProps) {
             </button>
           );
         })}
-        {battleLabel && (
-          <span className="ml-auto hidden shrink-0 rounded-md border border-[#2a3344] bg-[#16181d] px-2 py-1 text-[11px] text-[#8b95a8] sm:inline">
-            Batalla <span className="text-[#f59e0b]">{battleLabel}</span>
-          </span>
-        )}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <UtcClock />
+          {battleLabel && (
+            <span className="hidden rounded-md border border-[#2a3344] bg-[#16181d] px-2 py-1 text-[11px] text-[#8b95a8] sm:inline">
+              Batalla <span className="text-[#f59e0b]">{battleLabel}</span>
+            </span>
+          )}
+        </div>
       </div>
     </nav>
   );

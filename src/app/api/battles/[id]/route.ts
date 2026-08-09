@@ -41,10 +41,11 @@ export async function GET(
 
     if (!lite) {
       const cached = getCachedBattle(id);
-      if (cached && !fast) {
+      // Cache con kills sirve para fast y full (evita re-pegar Gameinfo)
+      if (cached && (cached.kills?.length ?? 0) > 0) {
         return NextResponse.json(
           { ...cached, warning: cached.warning ?? "Desde cache (instantáneo)" },
-          { headers: { "Cache-Control": "public, s-maxage=300" } },
+          { headers: { "Cache-Control": "public, s-maxage=120" } },
         );
       }
     }
@@ -60,7 +61,7 @@ export async function GET(
       );
     }
 
-    if (!lite && !detail.partial) {
+    if (!lite) {
       setCachedBattle(detail);
     }
 
